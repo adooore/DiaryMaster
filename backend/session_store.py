@@ -137,6 +137,30 @@ class SessionStore:
         self._write_active_id()
         return self._session
 
+    def delete_session(self, session_id: str) -> str:
+        """删除 Session（内存 + 磁盘）。返回删除后的 active session id。"""
+        if session_id not in self._sessions:
+            raise ValueError(f"Session 不存在: {session_id}")
+
+        path = SESSIONS_DIR / f"{session_id}.json"
+        del self._sessions[session_id]
+        if path.is_file():
+            path.unlink()
+
+        if not self._sessions:
+            return self.new_session().id
+
+        if self._active_id == session_id:
+            latest = sorted(
+                self._sessions.values(),
+                key=lambda s: s.created_at,
+                reverse=True,
+            )[0]
+            self._active_id = latest.id
+            self._write_active_id()
+
+        return self._active_id
+
     def _touch(self) -> None:
         self._persist(self._session)
 
@@ -378,12 +402,18 @@ class SessionStore:
         turn: int | None = None,
         *,
         steps: list[dict[str, Any]] | None = None,
+        reasoning: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         entry: dict[str, Any] = {"type": "message", "role": role, "text": text}
         if turn is not None:
             entry["turn"] = turn
         if steps:
             entry["steps"] = steps
+        if reasoning:
+            entry["reasoning"] = reasoning
+        if usage:
+            entry["usage"] = usage
         self._session.chat_log.append(entry)
         self._touch()
 

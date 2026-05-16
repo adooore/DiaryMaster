@@ -8,8 +8,8 @@ WORKSPACE = DEMO_ROOT / "workspace"
 WEB_DIR = DEMO_ROOT / "web"
 
 ENV_API_KEY = "DEEPSEEK_API_KEY"
-HOST = os.environ.get("DEEPNOTE_HOST", "127.0.0.1")
-PORT = int(os.environ.get("DEEPNOTE_PORT", "8765"))
+HOST = os.environ.get("DIARYMASTER_HOST") or os.environ.get("DEEPNOTE_HOST", "127.0.0.1")
+PORT = int(os.environ.get("DIARYMASTER_PORT") or os.environ.get("DEEPNOTE_PORT", "8765"))
 
 
 def load_dotenv_if_available() -> None:

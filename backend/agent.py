@@ -1,4 +1,4 @@
-"""DeepNote Agent：LangChain 工具、对话流式执行、文件变更记录。
+"""DiaryMaster Agent：LangChain 工具、对话流式执行、文件变更记录。
 
 本文件分层说明：
 - 带 @tool 的函数：暴露给大模型，docstring 会进入工具描述。
@@ -17,8 +17,14 @@ from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
-from backend.config import get_api_key
 from backend import workspace_fs
+from backend.context_usage import TurnUsageTracker
+from backend.model_registry import (
+    default_model_id,
+    get_model,
+    resolve_api_key,
+    validate_model_id,
+)
 from backend.patch_apply import PatchError, apply_unique_replace
 from backend.agent_steps import (
     clear_step_emitter,
@@ -41,7 +47,7 @@ _current_turn: int = 0  # 与 session_store.turn 对齐
 _collected_steps: list[dict[str, Any]] = []  # 本轮步骤快照，结束时写入 done 事件
 
 # 发给大模型的系统提示（与各 @tool 的 docstring 一起约束行为）。
-SYSTEM_PROMPT = f"""你是 DeepNote 的笔记助手，像朋友一样帮助用户整理和修改笔记。
+SYSTEM_PROMPT = f"""你是 DiaryMaster 的笔记助手，像朋友一样帮助用户整理和修改笔记。
 
 规则：
 - 不要编造用户没有明确表达的事实；信息不足时先简短追问。
@@ -97,6 +103,20 @@ def _step_thinking(label: str, *, step_id: str, status: str = "running") -> None
         {
             "id": step_id,
             "kind": "thinking",
+            "status": status,
+            "label": label,
+            "tool": None,
+            "path": None,
+        }
+    )
+
+
+def _step_reply_status(label: str, *, step_id: str, status: str = "running") -> None:
+    """回复生成状态（UI 固定显示在步骤列表最后一行）。"""
+    _publish(
+        {
+            "id": step_id,
+            "kind": "reply_status",
             "status": status,
             "label": label,
             "tool": None,
@@ -340,16 +360,31 @@ def _write_file_impl(rel: str, content: str) -> str:
     return _commit_file_change(rel, old_content, content, action="写入")
 
 
-def _build_agent():
-    """创建 LangChain Agent（DeepSeek 模型 + 四个文件工具 + SYSTEM_PROMPT）。"""
-    api_key = get_api_key()
-    if not api_key:
-        raise RuntimeError("未设置 DEEPSEEK_API_KEY")
-    model = init_chat_model(
-        "deepseek:deepseek-chat",
-        api_key=api_key,
-        temperature=0.3,
-    )
+def _create_chat_model(
+    model_id: str,
+    *,
+    thinking_enabled: bool,
+    temperature: float | None = 0.3,
+):
+    """按 registry 创建 LangChain 聊天模型（含思考模式 extra_body）。"""
+    spec = get_model(model_id)
+    api_key = resolve_api_key(spec)
+    extra_body = {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}}
+    kwargs: dict[str, Any] = {
+        "model": spec.langchain_model,
+        "api_key": api_key,
+        "model_kwargs": {"extra_body": extra_body},
+    }
+    if thinking_enabled:
+        return init_chat_model(**kwargs)
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    return init_chat_model(**kwargs)
+
+
+def _build_agent(model_id: str, thinking_enabled: bool):
+    """创建 LangChain Agent（按 model_id + 思考开关）。"""
+    model = _create_chat_model(model_id, thinking_enabled=thinking_enabled)
     return create_agent(
         model=model,
         tools=[list_files, read_file, edit_file, write_file],
@@ -357,15 +392,47 @@ def _build_agent():
     )
 
 
-_agent = None
+_agent_cache: dict[tuple[str, bool], Any] = {}
 
 
-def _get_agent():
-    """返回全局单例 Agent，首次调用时 _build_agent。"""
-    global _agent
-    if _agent is None:
-        _agent = _build_agent()
-    return _agent
+def _get_agent(model_id: str, thinking_enabled: bool):
+    """按 (model_id, thinking) 缓存 Agent 实例。"""
+    mid = validate_model_id(model_id)
+    key = (mid, bool(thinking_enabled))
+    if key not in _agent_cache:
+        _agent_cache[key] = _build_agent(mid, key[1])
+    return _agent_cache[key]
+
+
+def _extract_reasoning(msg: AIMessage) -> str:
+    """从 AIMessage 取出思考链文本（DeepSeek reasoning_content）。"""
+    ak = getattr(msg, "additional_kwargs", None) or {}
+    if isinstance(ak, dict):
+        rc = ak.get("reasoning_content")
+        if rc:
+            return rc if isinstance(rc, str) else str(rc)
+    rm = getattr(msg, "response_metadata", None) or {}
+    if isinstance(rm, dict):
+        rc = rm.get("reasoning_content")
+        if rc:
+            return rc if isinstance(rc, str) else str(rc)
+    return ""
+
+
+def _publish_reasoning_step(step_id: str, text: str, *, running: bool) -> None:
+    if not text.strip():
+        return
+    _publish(
+        {
+            "id": step_id,
+            "kind": "reasoning",
+            "tool": None,
+            "status": "running" if running else "done",
+            "label": "思考中…" if running else "思考过程",
+            "path": None,
+            "detail": truncate_detail(text, 4000),
+        }
+    )
 
 
 def _extract_ai_text(msg: AIMessage) -> str:
@@ -434,7 +501,11 @@ def _flush_pending(pending: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
 
 
 def chat_stream(
-    user_message: str, current_file: str | None = None
+    user_message: str,
+    current_file: str | None = None,
+    *,
+    model_id: str | None = None,
+    thinking_enabled: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """
     流式执行一轮对话（主入口）。
@@ -455,8 +526,15 @@ def chat_stream(
     _current_turn = store.begin_turn()
     turn = _current_turn
 
+    mid = validate_model_id(model_id)
+    thinking = bool(thinking_enabled)
+
     pending: list[dict[str, Any]] = []
-    thinking_id = f"think-{uuid.uuid4().hex[:8]}"
+    reply_step_id = f"reply-{uuid.uuid4().hex[:8]}"
+    reasoning_step_id = f"reasoning-{uuid.uuid4().hex[:8]}"
+    reply_step_started = False
+    reasoning_acc = ""
+    usage_tracker = TurnUsageTracker()
 
     def emit(step: dict[str, Any]) -> None:
         pending.append(step)
@@ -469,12 +547,10 @@ def chat_stream(
     full_message = _build_user_message(user_message.strip(), current_file)
     messages.append(HumanMessage(content=full_message))
 
-    _step_thinking("思考中…", step_id=thinking_id, status="running")
-
     final_state: dict[str, Any] | None = None
 
     try:
-        agent = _get_agent()
+        agent = _get_agent(mid, thinking)
         for item in agent.stream(
             {"messages": messages},
             stream_mode=["updates", "values"],
@@ -495,19 +571,26 @@ def chat_stream(
             for msg in chunk.get("model", {}).get("messages", []):
                 if not isinstance(msg, AIMessage):
                     continue
+                usage_tracker.absorb_message(msg)
+                reasoning_text = _extract_reasoning(msg)
+                if reasoning_text and len(reasoning_text) > len(reasoning_acc):
+                    reasoning_acc = reasoning_text
+                    _publish_reasoning_step(
+                        reasoning_step_id, reasoning_acc, running=True
+                    )
+                    yield from _flush_pending(pending)
                 _publish_agent_model_step(msg)
                 yield from _flush_pending(pending)
-                if msg.tool_calls:
-                    names = ", ".join(_tool_call_name(tc) for tc in msg.tool_calls)
-                    _step_thinking(f"准备调用: {names}", step_id=thinking_id, status="running")
+                if (
+                    not msg.tool_calls
+                    and _extract_ai_text(msg)
+                    and not reply_step_started
+                ):
+                    _step_reply_status(
+                        "生成回复…", step_id=reply_step_id, status="running"
+                    )
+                    reply_step_started = True
                     yield from _flush_pending(pending)
-                elif _extract_ai_text(msg) and not msg.tool_calls:
-                    _step_thinking("生成回复…", step_id=thinking_id, status="running")
-                    yield from _flush_pending(pending)
-
-            if "tools" in chunk:
-                _step_thinking("执行工具…", step_id=thinking_id, status="running")
-                yield from _flush_pending(pending)
 
         yield from _flush_pending(pending)
 
@@ -522,6 +605,12 @@ def chat_stream(
         written = list(_written_this_turn)
         turn_changes = [c.to_dict() for c in _changes_this_turn]
 
+        if reasoning_acc:
+            _publish_reasoning_step(
+                reasoning_step_id, reasoning_acc, running=False
+            )
+            yield from _flush_pending(pending)
+
         session_title: str | None = None
         if turn == 1 and not session.title_locked:
             yield from _flush_pending(pending)
@@ -529,16 +618,31 @@ def chat_stream(
                 "generate_title",
                 "生成会话标题",
                 lambda: _generate_session_title_impl(
-                    user_message.strip(), reply
+                    user_message.strip(), reply, model_id=mid
                 ),
             )
             store.set_session_title(session_title, manual=False)
             yield from _flush_pending(pending)
 
+        _step_reply_status(
+            "回复生成完成", step_id=reply_step_id, status="done"
+        )
+        yield from _flush_pending(pending)
+
         steps_snapshot = [dict(s) for s in _collected_steps]
 
         _written_this_turn = []
         _changes_this_turn = []
+
+        turn_usage = usage_tracker.to_dict()
+        if not turn_usage:
+            from backend.context_usage import (
+                estimate_session_context_tokens,
+                normalize_turn_usage,
+            )
+
+            est = estimate_session_context_tokens(out_messages)
+            turn_usage = normalize_turn_usage(est, source="estimate")
 
         done_payload: dict[str, Any] = {
             "type": "done",
@@ -548,26 +652,42 @@ def chat_stream(
             "steps": steps_snapshot,
             "session_id": session.id,
             "turn": turn,
+            "usage": turn_usage,
         }
+        if reasoning_acc:
+            done_payload["reasoning"] = reasoning_acc
         if session_title:
             done_payload["session_title"] = session_title
         yield done_payload
     except Exception as e:
         yield from _flush_pending(pending)
-        _step_thinking("出错", step_id=thinking_id, status="error")
-        if _collected_steps:
-            yield _collected_steps[-1]
+        if reply_step_started:
+            _step_reply_status(
+                "回复生成失败", step_id=reply_step_id, status="error"
+            )
+            yield from _flush_pending(pending)
         yield {"type": "error", "detail": str(e), "turn": turn}
     finally:
         clear_step_emitter()
 
 
-def chat(user_message: str, current_file: str | None = None) -> tuple[str, list[str], list[dict]]:
+def chat(
+    user_message: str,
+    current_file: str | None = None,
+    *,
+    model_id: str | None = None,
+    thinking_enabled: bool = False,
+) -> tuple[str, list[str], list[dict]]:
     """非流式封装：跑完 chat_stream 只取 done 里的结果（测试或 /api/chat 用）。"""
     reply = ""
     written: list[str] = []
     changes: list[dict] = []
-    for event in chat_stream(user_message, current_file):
+    for event in chat_stream(
+        user_message,
+        current_file,
+        model_id=model_id,
+        thinking_enabled=thinking_enabled,
+    ):
         if event.get("type") == "done":
             reply = event.get("reply", "")
             written = event.get("written_files", [])
@@ -587,6 +707,11 @@ def switch_session(session_id: str) -> str:
     """切换到已有 Session。"""
     session = store.switch_session(session_id)
     return session.id
+
+
+def delete_session(session_id: str) -> str:
+    """删除 Session，返回新的 active session id。"""
+    return store.delete_session(session_id)
 
 
 def list_sessions() -> list[dict]:
@@ -622,21 +747,22 @@ def rollback_latest(path: str | None = None) -> dict:
     return store.rollback_latest(path)
 
 
-def _generate_session_title_impl(user_message: str, assistant_reply: str) -> str:
+def _generate_session_title_impl(
+    user_message: str,
+    assistant_reply: str,
+    *,
+    model_id: str | None = None,
+) -> str:
     """
     （内部）单独调用 LLM 生成 Session 标题，不推送步骤。
     由 chat_stream 通过 _run_llm_step 包装后展示在 UI。
     """
-    api_key = get_api_key()
-    if not api_key:
+    try:
+        mid = validate_model_id(model_id or default_model_id())
+        model = _create_chat_model(mid, thinking_enabled=False, temperature=0.2)
+    except RuntimeError:
         fallback = user_message.strip()
         return (fallback[:20] + "…") if len(fallback) > 20 else fallback or "新对话"
-
-    model = init_chat_model(
-        "deepseek:deepseek-chat",
-        api_key=api_key,
-        temperature=0.2,
-    )
     prompt = (
         "根据下面第一轮对话，为笔记会话起一个简短中文标题。\n"
         "要求：不超过 20 个字；不要引号；不要句号；只输出标题本身。\n\n"

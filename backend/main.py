@@ -15,14 +15,18 @@ from pydantic import BaseModel
 
 from backend import agent, workspace_fs
 from backend.config import WEB_DIR
+from backend.context_usage import get_session_context_usage
+from backend.model_registry import default_model_id, list_models, validate_model_id
 from backend.session_store import store
 
-app = FastAPI(title="DeepNote Demo")
+app = FastAPI(title="DiaryMaster")
 
 
 class ChatRequest(BaseModel):
     message: str
     current_file: str | None = None
+    model_id: str | None = None
+    thinking_enabled: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -44,6 +48,22 @@ class ManualSaveRequest(BaseModel):
 
 class SessionTitleRequest(BaseModel):
     title: str
+
+
+@app.get("/api/models")
+def api_list_models():
+    return {"models": list_models(), "default_model_id": default_model_id()}
+
+
+@app.get("/api/session/context-usage")
+def api_session_context_usage(model_id: str | None = None):
+    mid = validate_model_id(model_id)
+    session = store.get_session()
+    return get_session_context_usage(
+        session.messages,
+        mid,
+        chat_log=session.chat_log,
+    )
 
 
 @app.get("/api/session")
@@ -239,11 +259,30 @@ def _persist_chat_turn(user_text: str, done: dict) -> str | None:
         done.get("reply", ""),
         turn=turn,
         steps=done.get("steps"),
+        reasoning=done.get("reasoning"),
+        usage=done.get("usage"),
     )
     changes = done.get("changes") or []
     if changes:
         store.append_chat_changes(turn, [c["id"] for c in changes])
     return done.get("session_title")
+
+
+@app.delete("/api/session/{session_id}")
+def api_delete_session(session_id: str):
+    try:
+        active_id = agent.delete_session(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    info = agent.get_session_info()
+    info["sessions"] = store.list_sessions()
+    info["active_id"] = store.active_id
+    return {
+        "ok": True,
+        "deleted_id": session_id,
+        "active_id": active_id,
+        **info,
+    }
 
 
 @app.patch("/api/session/{session_id}/title")
@@ -272,7 +311,13 @@ def api_chat(req: ChatRequest):
     try:
         user_text = req.message.strip()
         done = None
-        for event in agent.chat_stream(user_text, req.current_file):
+        mid = validate_model_id(req.model_id)
+        for event in agent.chat_stream(
+            user_text,
+            req.current_file,
+            model_id=mid,
+            thinking_enabled=req.thinking_enabled,
+        ):
             if event.get("type") == "done":
                 done = event
             elif event.get("type") == "error":
@@ -280,7 +325,7 @@ def api_chat(req: ChatRequest):
         if not done:
             raise RuntimeError("Agent 未返回结果")
 
-        auto_title = _persist_chat_turn(user_text, done)
+        _persist_chat_turn(user_text, done)
         session = store.get_session()
         return ChatResponse(
             reply=done["reply"],
@@ -304,7 +349,13 @@ def api_chat_stream(req: ChatRequest):
     def generate():
         user_text = req.message.strip()
         try:
-            for event in agent.chat_stream(user_text, req.current_file):
+            mid = validate_model_id(req.model_id)
+            for event in agent.chat_stream(
+                user_text,
+                req.current_file,
+                model_id=mid,
+                thinking_enabled=req.thinking_enabled,
+            ):
                 if event.get("type") == "done":
                     _persist_chat_turn(user_text, event)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -357,5 +408,5 @@ if __name__ == "__main__":
 
     from backend.config import HOST, PORT
 
-    print(f"DeepNote Demo: http://{HOST}:{PORT}")
+    print(f"DiaryMaster: http://{HOST}:{PORT}")
     uvicorn.run(app, host=HOST, port=PORT)

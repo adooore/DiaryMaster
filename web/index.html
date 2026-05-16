@@ -1,52 +1,141 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DeepNote Demo</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <title>DiaryMaster</title>
+  <script>
+    (function () {
+      var t = localStorage.getItem("diarymaster-theme") || localStorage.getItem("deepnote-theme");
+      if (t === "dark" || t === "blossom") document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=17" />
 </head>
 <body>
   <header class="topbar">
-    <span class="logo">DeepNote Demo</span>
-    <label class="session-picker">
-      <span class="session-picker-label">Session</span>
-      <select id="session-select" class="session-select" title="切换历史 Session"></select>
-    </label>
-    <button type="button" id="btn-rename-session" class="btn secondary" title="重命名当前 Session">重命名</button>
-    <button type="button" id="btn-new-session" class="btn secondary">新建 Session</button>
+    <span class="logo serif-title">DiaryMaster</span>
+    <div class="theme-switch" role="group" aria-label="界面主题">
+      <button type="button" class="theme-btn active" data-theme="dark" aria-pressed="true" data-tooltip="深色 · 香槟金">深色</button>
+      <button type="button" class="theme-btn" data-theme="blossom" aria-pressed="false" data-tooltip="浅色 · 白粉搭配">浅色</button>
+    </div>
   </header>
-  <main class="layout">
-    <aside class="panel panel-tree">
+  <main class="layout" id="app-layout">
+    <aside class="panel panel-tree" id="panel-tree">
       <div class="panel-title">文件</div>
       <ul id="file-tree" class="file-tree"></ul>
     </aside>
-    <section class="panel panel-editor">
+    <div class="resize-handle" data-resize="tree-editor" role="separator" aria-orientation="vertical" aria-label="调整文件栏宽度" tabindex="0"></div>
+    <section class="panel panel-editor" id="panel-editor">
       <div class="panel-title editor-toolbar">
-        <span id="current-file-label">未选择文件</span>
+        <span id="current-file-label" class="serif-title">未选择文件</span>
         <div class="toolbar-actions">
           <span id="diff-stats" class="diff-stats hidden"></span>
           <button type="button" id="btn-mode-edit" class="btn tab active" disabled>编辑</button>
+          <button type="button" id="btn-mode-preview" class="btn tab" disabled>预览</button>
           <button type="button" id="btn-mode-diff" class="btn tab" disabled>变更</button>
-          <button type="button" id="btn-undo" class="btn secondary" disabled title="撤销当前文件最近一次变更">撤销</button>
           <button type="button" id="btn-save" class="btn" disabled>保存</button>
         </div>
       </div>
       <div class="editor-wrap">
         <textarea id="editor" class="editor" placeholder="在左侧选择文件…" spellcheck="false"></textarea>
+        <div id="editor-preview" class="editor-preview markdown-body hidden" aria-label="Markdown 预览"></div>
         <pre id="diff-view" class="diff-view hidden" aria-label="文件变更对比"></pre>
       </div>
     </section>
-    <aside class="panel panel-chat">
-      <div class="panel-title">Agent</div>
+    <div class="resize-handle" data-resize="editor-chat" role="separator" aria-orientation="vertical" aria-label="调整对话栏宽度" tabindex="0"></div>
+    <aside class="panel panel-chat" id="panel-chat">
+      <div class="panel-title agent-panel-head">
+        <div class="session-control">
+          <div class="session-tabs" id="session-tabs" role="tablist" aria-label="已打开的会话"></div>
+        </div>
+        <div class="session-actions">
+          <button type="button" id="btn-new-session" class="icon-btn icon-btn-primary" data-tooltip="新建对话" aria-label="新建对话">+</button>
+          <button type="button" id="btn-session-history" class="icon-btn" data-tooltip="历史会话" aria-label="历史会话" aria-pressed="false">☰</button>
+        </div>
+      </div>
       <div id="chat-messages" class="chat-messages"></div>
       <form id="chat-form" class="chat-form">
-        <textarea id="chat-input" rows="3" placeholder="和 Agent 说话…"></textarea>
-        <button type="submit" class="btn" id="btn-send">发送</button>
+        <div class="chat-composer">
+          <textarea id="chat-input" rows="3" placeholder="询问 Agent 或下达指令…"></textarea>
+          <div class="chat-composer-bar">
+            <div class="composer-prefs">
+              <span class="composer-model-label">模型</span>
+              <div class="model-picker" id="model-picker">
+                <button
+                  type="button"
+                  class="model-picker-trigger"
+                  id="model-picker-trigger"
+                  aria-haspopup="listbox"
+                  aria-expanded="false"
+                  aria-label="选择模型"
+                  data-tooltip="选择模型"
+                  data-tooltip-placement="above"
+                >
+                  <span class="model-picker-label" id="model-picker-label">—</span>
+                  <span class="model-picker-chevron" aria-hidden="true">▾</span>
+                </button>
+                <ul
+                  class="model-picker-menu ui-popover ui-popover-above hidden"
+                  id="model-picker-menu"
+                  role="listbox"
+                  aria-label="模型列表"
+                ></ul>
+              </div>
+              <label class="composer-thinking-toggle" data-tooltip="开启后展示模型思考过程" data-tooltip-placement="above">
+                <input type="checkbox" id="thinking-toggle" />
+                <span>思考</span>
+              </label>
+            </div>
+            <div class="composer-actions">
+            <div
+              id="session-context-ring"
+              class="session-context-ring hidden"
+              role="status"
+              tabindex="0"
+              aria-label="上下文占用"
+              data-tooltip-placement="above"
+            >
+              <svg class="context-ring-svg" viewBox="0 0 20 20" aria-hidden="true">
+                <circle class="context-ring-track" cx="10" cy="10" r="8" fill="none" stroke-width="2" />
+                <circle
+                  class="context-ring-progress"
+                  cx="10"
+                  cy="10"
+                  r="8"
+                  fill="none"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  transform="rotate(-90 10 10)"
+                />
+              </svg>
+            </div>
+              <button type="submit" class="btn" id="btn-send">发送</button>
+            </div>
+          </div>
+        </div>
       </form>
     </aside>
+    <div
+      class="resize-handle resize-handle-history hidden"
+      data-resize="chat-history"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整历史栏宽度"
+      tabindex="0"
+    ></div>
+    <aside class="panel panel-history hidden" id="panel-history" aria-label="历史会话">
+      <div class="panel-title panel-history-title">历史对话</div>
+      <ul id="session-history-list" class="session-history-list"></ul>
+    </aside>
   </main>
+  <div id="app-tooltip" class="app-tooltip hidden" role="tooltip" aria-hidden="true"></div>
   <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
+  <script src="/static/app.js?v=17"></script>
 </body>
 </html>

@@ -13,7 +13,7 @@ if __name__ == "__main__":
 
     from backend.config import HOST, PORT
 
-    print(f"DeepNote Demo: http://{HOST}:{PORT}")
+    print(f"DiaryMaster: http://{HOST}:{PORT}")
     uvicorn.run(
         "backend.main:app",
         host=HOST,
