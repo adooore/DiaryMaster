@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepNote Demo</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <span class="logo">DeepNote Demo</span>
+    <label class="session-picker">
+      <span class="session-picker-label">Session</span>
+      <select id="session-select" class="session-select" title="切换历史 Session"></select>
+    </label>
+    <button type="button" id="btn-rename-session" class="btn secondary" title="重命名当前 Session">重命名</button>
+    <button type="button" id="btn-new-session" class="btn secondary">新建 Session</button>
+  </header>
+  <main class="layout">
+    <aside class="panel panel-tree">
+      <div class="panel-title">文件</div>
+      <ul id="file-tree" class="file-tree"></ul>
+    </aside>
+    <section class="panel panel-editor">
+      <div class="panel-title editor-toolbar">
+        <span id="current-file-label">未选择文件</span>
+        <div class="toolbar-actions">
+          <span id="diff-stats" class="diff-stats hidden"></span>
+          <button type="button" id="btn-mode-edit" class="btn tab active" disabled>编辑</button>
+          <button type="button" id="btn-mode-diff" class="btn tab" disabled>变更</button>
+          <button type="button" id="btn-undo" class="btn secondary" disabled title="撤销当前文件最近一次变更">撤销</button>
+          <button type="button" id="btn-save" class="btn" disabled>保存</button>
+        </div>
+      </div>
+      <div class="editor-wrap">
+        <textarea id="editor" class="editor" placeholder="在左侧选择文件…" spellcheck="false"></textarea>
+        <pre id="diff-view" class="diff-view hidden" aria-label="文件变更对比"></pre>
+      </div>
+    </section>
+    <aside class="panel panel-chat">
+      <div class="panel-title">Agent</div>
+      <div id="chat-messages" class="chat-messages"></div>
+      <form id="chat-form" class="chat-form">
+        <textarea id="chat-input" rows="3" placeholder="和 Agent 说话…"></textarea>
+        <button type="submit" class="btn" id="btn-send">发送</button>
+      </form>
+    </aside>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
