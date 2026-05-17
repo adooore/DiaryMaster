@@ -1,3 +1,9 @@
+"""
+多 Session 持久化：对话 chat_log、文件变更 FileChange、轮次 turn。
+
+数据目录：data/sessions/*.json、data/active_session.txt（均在 .gitignore）。
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,14 +13,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.config import DEMO_ROOT
+from backend.config import APP_ROOT
 
-SESSIONS_DIR = DEMO_ROOT / "data" / "sessions"
-ACTIVE_ID_FILE = DEMO_ROOT / "data" / "active_session.txt"
+SESSIONS_DIR = APP_ROOT / "data" / "sessions"
+ACTIVE_ID_FILE = APP_ROOT / "data" / "active_session.txt"
 
 
 @dataclass
 class FileChange:
+    """一条文件内容变更记录（Agent 或用户保存产生，可回退）。"""
+
     id: str
     turn: int
     path: str
@@ -25,9 +33,11 @@ class FileChange:
     rollback_of: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """完整序列化（含 old/new 全文，供持久化）。"""
         return asdict(self)
 
     def summary(self) -> dict[str, Any]:
+        """摘要信息（不含全文，供 API 列表与 UI）。"""
         old_lines = (self.old_content or "").splitlines()
         new_lines = (self.new_content or "").splitlines()
         return {
@@ -44,6 +54,8 @@ class FileChange:
 
 @dataclass
 class Session:
+    """单个对话 Session：标题、轮次、LangChain messages、变更与 chat_log。"""
+
     id: str
     created_at: str = ""
     title: str = ""
@@ -54,6 +66,7 @@ class Session:
     chat_log: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """供列表/顶栏展示的 Session 摘要。"""
         return {
             "id": self.id,
             "title": self.title or self.id,
@@ -65,13 +78,15 @@ class Session:
 
 
 def _now_iso() -> str:
+    """当前 UTC 时间的 ISO 字符串。"""
     return datetime.now(timezone.utc).isoformat()
 
 
 class SessionStore:
-    """多 Session 管理：内存 + 本地 JSON 持久化（demo/data/sessions/）。"""
+    """多 Session 管理：内存 + 本地 JSON 持久化（data/sessions/）。"""
 
     def __init__(self) -> None:
+        """从磁盘加载所有 Session，若无则新建一个。"""
         self._sessions: dict[str, Session] = {}
         self._active_id: str = ""
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,13 +107,16 @@ class SessionStore:
 
     @property
     def active_id(self) -> str:
+        """当前激活的 Session id。"""
         return self._active_id
 
     @property
     def _session(self) -> Session:
+        """当前激活的 Session 对象（内部用）。"""
         return self._sessions[self._active_id]
 
     def _create_session_obj(self) -> Session:
+        """生成未持久化的新 Session 对象。"""
         return Session(
             id=str(uuid.uuid4())[:8],
             created_at=_now_iso(),
@@ -106,9 +124,11 @@ class SessionStore:
         )
 
     def get_session(self) -> Session:
+        """返回当前激活的 Session。"""
         return self._session
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        """所有 Session 摘要列表（含 is_active），按创建时间倒序。"""
         items = sorted(
             self._sessions.values(),
             key=lambda s: s.created_at,
@@ -123,6 +143,7 @@ class SessionStore:
         ]
 
     def new_session(self) -> Session:
+        """新建 Session 并设为当前激活，写入磁盘。"""
         session = self._create_session_obj()
         self._sessions[session.id] = session
         self._active_id = session.id
@@ -131,6 +152,7 @@ class SessionStore:
         return session
 
     def switch_session(self, session_id: str) -> Session:
+        """切换激活 Session（仅改 active_id，不重新加载磁盘）。"""
         if session_id not in self._sessions:
             raise ValueError(f"Session 不存在: {session_id}")
         self._active_id = session_id
@@ -162,9 +184,11 @@ class SessionStore:
         return self._active_id
 
     def _touch(self) -> None:
+        """持久化当前激活 Session。"""
         self._persist(self._session)
 
     def _persist(self, session: Session) -> None:
+        """将指定 Session 写入 data/sessions/{id}.json。"""
         path = SESSIONS_DIR / f"{session.id}.json"
         data = {
             "id": session.id,
@@ -178,15 +202,18 @@ class SessionStore:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _read_active_id(self) -> str | None:
+        """从 active_session.txt 读取上次激活的 id。"""
         if not ACTIVE_ID_FILE.is_file():
             return None
         text = ACTIVE_ID_FILE.read_text(encoding="utf-8").strip()
         return text or None
 
     def _write_active_id(self) -> None:
+        """把当前 active_id 写入 active_session.txt。"""
         ACTIVE_ID_FILE.write_text(self._active_id, encoding="utf-8")
 
     def _load_all_from_disk(self) -> None:
+        """启动时加载 data/sessions 下全部 JSON。"""
         for path in SESSIONS_DIR.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -197,6 +224,7 @@ class SessionStore:
                 continue
 
     def _session_from_json(self, data: dict[str, Any]) -> Session:
+        """把磁盘 JSON 反序列化为 Session（messages 稍后由 chat_log 重建）。"""
         changes = [
             FileChange(**c) for c in data.get("changes", [])
         ]
@@ -212,7 +240,10 @@ class SessionStore:
         )
 
     def rebuild_agent_messages_for(self, session: Session) -> None:
-        from langchain_core.messages import AIMessage, HumanMessage
+        """从 chat_log 重建 session.messages（供 Agent 继续对话）。"""
+        from langchain_core.messages import HumanMessage
+
+        from backend.reasoning_messages import ai_message_from_chat_log
 
         msgs: list = []
         for event in session.chat_log:
@@ -225,13 +256,21 @@ class SessionStore:
             if role == "user":
                 msgs.append(HumanMessage(content=text))
             elif role == "assistant":
-                msgs.append(AIMessage(content=text))
+                reasoning = event.get("reasoning")
+                msgs.append(
+                    ai_message_from_chat_log(
+                        text,
+                        reasoning=reasoning if isinstance(reasoning, str) else None,
+                    )
+                )
         session.messages = msgs
 
     def rebuild_agent_messages_from_chat_log(self) -> None:
+        """重建当前激活 Session 的 messages。"""
         self.rebuild_agent_messages_for(self._session)
 
     def begin_turn(self) -> int:
+        """开始新一轮对话：turn += 1 并返回新轮次号。"""
         self._session.turn += 1
         return self._session.turn
 
@@ -245,6 +284,7 @@ class SessionStore:
         turn: int | None = None,
         rollback_of: str | None = None,
     ) -> FileChange | None:
+        """记录一条文件变更；内容相同则返回 None。"""
         if old_content == new_content:
             return None
         rel = path.replace("\\", "/").lstrip("/")
@@ -263,12 +303,14 @@ class SessionStore:
         return change
 
     def _index_of_change(self, change_id: str) -> int:
+        """变更在 changes 列表中的下标，不存在返回 -1。"""
         for i, c in enumerate(self._session.changes):
             if c.id == change_id:
                 return i
         return -1
 
     def _content_for_path_before_index(self, path: str, cut_idx: int) -> str:
+        """回退计算：某路径在 cut_idx 之前应有的文件内容。"""
         prior = [c for c in self._session.changes[:cut_idx] if c.path == path]
         if prior:
             return prior[-1].new_content
@@ -353,6 +395,7 @@ class SessionStore:
         }
 
     def rollback_to(self, change_id: str) -> dict[str, Any]:
+        """回退到某条变更所在轮次之前（等价于 rollback_to_turn）。"""
         idx = self._index_of_change(change_id)
         if idx < 0:
             raise ValueError("变更记录不存在")
@@ -362,6 +405,7 @@ class SessionStore:
         return result
 
     def rollback_latest(self, path: str | None = None) -> dict[str, Any]:
+        """回退指定文件最近一次变更，或整个 Session 最后一轮。"""
         if path:
             rel = path.replace("\\", "/").lstrip("/")
             file_changes = [c for c in self._session.changes if c.path == rel]
@@ -381,18 +425,21 @@ class SessionStore:
         return self.rollback_to_turn(max_turn)
 
     def get_change(self, change_id: str) -> FileChange | None:
+        """按 id 查找变更（当前 Session）。"""
         for c in self._session.changes:
             if c.id == change_id:
                 return c
         return None
 
     def list_changes(self, path: str | None = None) -> list[FileChange]:
+        """列出变更；path 可选，仅该文件的变更。"""
         if not path:
             return list(self._session.changes)
         rel = path.replace("\\", "/").lstrip("/")
         return [c for c in self._session.changes if c.path == rel]
 
     def clear_messages(self) -> None:
+        """清空当前 Session 的 LangChain messages（不删 chat_log）。"""
         self._session.messages = []
 
     def append_chat_message(
@@ -405,6 +452,7 @@ class SessionStore:
         reasoning: str | None = None,
         usage: dict[str, Any] | None = None,
     ) -> None:
+        """追加一条对话消息到 chat_log（user/assistant/system）。"""
         entry: dict[str, Any] = {"type": "message", "role": role, "text": text}
         if turn is not None:
             entry["turn"] = turn
@@ -439,6 +487,7 @@ class SessionStore:
         return session.title
 
     def append_chat_changes(self, turn: int, change_ids: list[str]) -> None:
+        """在 chat_log 中记录一轮产生的变更 id 列表。"""
         if not change_ids:
             return
         self._session.chat_log.append(
@@ -447,6 +496,7 @@ class SessionStore:
         self._touch()
 
     def get_chat_log_for_api(self) -> list[dict[str, Any]]:
+        """展开 chat_log 供前端渲染（changes 事件内嵌变更摘要）。"""
         result: list[dict[str, Any]] = []
         for event in self._session.chat_log:
             if event.get("type") == "changes":
@@ -469,6 +519,7 @@ class SessionStore:
         return result
 
     def sync_chat_log_with_changes(self) -> None:
+        """删除 chat_log 中已无效的 change_ids 引用（回退后调用）。"""
         valid = {c.id for c in self._session.changes}
         new_log: list[dict[str, Any]] = []
         for event in self._session.chat_log:

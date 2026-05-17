@@ -21,6 +21,7 @@ from backend import workspace_fs
 from backend.context_usage import TurnUsageTracker
 from backend.model_registry import (
     default_model_id,
+    deepseek_api_model_name,
     get_model,
     resolve_api_key,
     validate_model_id,
@@ -34,6 +35,11 @@ from backend.agent_steps import (
     set_step_emitter,
     tool_result_status,
     truncate_detail,
+)
+from backend.deepseek_chat import DiaryMasterChatDeepSeek
+from backend.reasoning_messages import (
+    extract_reasoning_content,
+    normalize_reasoning_on_messages,
 )
 from backend.session_store import FileChange, store
 
@@ -376,7 +382,11 @@ def _create_chat_model(
         "model_kwargs": {"extra_body": extra_body},
     }
     if thinking_enabled:
-        return init_chat_model(**kwargs)
+        return DiaryMasterChatDeepSeek(
+            model=deepseek_api_model_name(spec),
+            api_key=api_key,
+            model_kwargs={"extra_body": extra_body},
+        )
     if temperature is not None:
         kwargs["temperature"] = temperature
     return init_chat_model(**kwargs)
@@ -395,6 +405,11 @@ def _build_agent(model_id: str, thinking_enabled: bool):
 _agent_cache: dict[tuple[str, bool], Any] = {}
 
 
+def clear_agent_cache() -> None:
+    """清空 Agent 实例缓存（换 API Key 或模型配置后调用）。"""
+    _agent_cache.clear()
+
+
 def _get_agent(model_id: str, thinking_enabled: bool):
     """按 (model_id, thinking) 缓存 Agent 实例。"""
     mid = validate_model_id(model_id)
@@ -406,20 +421,11 @@ def _get_agent(model_id: str, thinking_enabled: bool):
 
 def _extract_reasoning(msg: AIMessage) -> str:
     """从 AIMessage 取出思考链文本（DeepSeek reasoning_content）。"""
-    ak = getattr(msg, "additional_kwargs", None) or {}
-    if isinstance(ak, dict):
-        rc = ak.get("reasoning_content")
-        if rc:
-            return rc if isinstance(rc, str) else str(rc)
-    rm = getattr(msg, "response_metadata", None) or {}
-    if isinstance(rm, dict):
-        rc = rm.get("reasoning_content")
-        if rc:
-            return rc if isinstance(rc, str) else str(rc)
-    return ""
+    return extract_reasoning_content(msg)
 
 
 def _publish_reasoning_step(step_id: str, text: str, *, running: bool) -> None:
+    """推送思考链步骤（kind=reasoning，开启思考模式时流式更新）。"""
     if not text.strip():
         return
     _publish(
@@ -537,6 +543,7 @@ def chat_stream(
     usage_tracker = TurnUsageTracker()
 
     def emit(step: dict[str, Any]) -> None:
+        """将 Agent 步骤事件放入 pending，供 chat_stream 稍后 yield。"""
         pending.append(step)
 
     clear_step_emitter()
@@ -544,6 +551,8 @@ def chat_stream(
 
     session = store.get_session()
     messages = list(session.messages)
+    if thinking:
+        normalize_reasoning_on_messages(messages)
     full_message = _build_user_message(user_message.strip(), current_file)
     messages.append(HumanMessage(content=full_message))
 
@@ -598,6 +607,8 @@ def chat_stream(
             raise RuntimeError("Agent 未返回最终状态")
 
         out_messages = final_state.get("messages", [])
+        if thinking:
+            normalize_reasoning_on_messages(out_messages)
         session.messages.clear()
         session.messages.extend(out_messages)
 

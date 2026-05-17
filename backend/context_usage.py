@@ -13,6 +13,7 @@ TOOLS_AND_FRAME_OVERHEAD = 2_000
 
 
 def estimate_tokens(text: str) -> int:
+    """中英混合字符启发式估算 token 数（无官方 tokenizer 时的回退）。"""
     if not text:
         return 0
     cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
@@ -21,6 +22,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def _content_to_str(content: Any) -> str:
+    """把 LangChain message content（str 或多段块）转成纯文本。"""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -40,6 +42,7 @@ def _content_to_str(content: Any) -> str:
 
 
 def estimate_message_tokens(msg: Any) -> int:
+    """估算单条消息的 token（含 tool_calls 等附加字段）。"""
     text = _content_to_str(getattr(msg, "content", None))
     extra: list[str] = []
     for tc in getattr(msg, "tool_calls", None) or []:
@@ -52,12 +55,14 @@ def estimate_message_tokens(msg: Any) -> int:
 
 
 def _system_prompt_tokens() -> int:
+    """系统提示词占用的估算 token。"""
     from backend.agent import SYSTEM_PROMPT
 
     return estimate_tokens(SYSTEM_PROMPT)
 
 
 def estimate_session_context_tokens(messages: list[Any]) -> int:
+    """根据 messages 列表估算送入模型的总 prompt token（含系统提示与工具开销）。"""
     total = _system_prompt_tokens() + TOOLS_AND_FRAME_OVERHEAD
     for msg in messages or []:
         total += estimate_message_tokens(msg)
@@ -65,6 +70,7 @@ def estimate_session_context_tokens(messages: list[Any]) -> int:
 
 
 def _usage_dict_from_metadata(raw: Any) -> dict[str, int] | None:
+    """从 usage_metadata / token_usage 等原始结构解析统一 usage 字典。"""
     if raw is None:
         return None
     if hasattr(raw, "get") and callable(raw.get):
@@ -93,6 +99,7 @@ def _usage_dict_from_metadata(raw: Any) -> dict[str, int] | None:
 
 
 def extract_usage_from_ai_message(msg: AIMessage) -> dict[str, int] | None:
+    """从 AIMessage 提取 prompt/completion/total tokens（API 计量）。"""
     usage = _usage_dict_from_metadata(getattr(msg, "usage_metadata", None))
     if usage:
         return usage
@@ -111,6 +118,7 @@ def normalize_turn_usage(
     *,
     source: str = "api",
 ) -> dict[str, Any]:
+    """构造写入 chat_log 与 done 事件的 usage 字段。"""
     return {
         "prompt_tokens": int(prompt_tokens),
         "completion_tokens": int(completion_tokens),
@@ -123,6 +131,7 @@ class TurnUsageTracker:
     """一轮 Agent 内多次 model 调用的 usage 聚合（圆环用 prompt max）。"""
 
     def __init__(self) -> None:
+        """初始化一轮对话的 usage 累计器。"""
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
@@ -130,6 +139,7 @@ class TurnUsageTracker:
         self._saw_api = False
 
     def absorb_message(self, msg: AIMessage) -> None:
+        """吸收一次 model 调用的 usage（prompt 取 max，completion 累加）。"""
         u = extract_usage_from_ai_message(msg)
         if not u:
             return
@@ -139,6 +149,7 @@ class TurnUsageTracker:
         self.total_tokens += u["total_tokens"]
 
     def to_dict(self) -> dict[str, Any] | None:
+        """若本轮见过 API usage 则返回 dict，否则 None。"""
         if not self._saw_api or self.prompt_tokens <= 0:
             return None
         return normalize_turn_usage(
@@ -150,6 +161,7 @@ class TurnUsageTracker:
 
 
 def last_usage_from_chat_log(chat_log: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """从 chat_log 最后一条带 usage 的 assistant 消息读取 token 信息。"""
     for entry in reversed(chat_log or []):
         if entry.get("type") != "message" or entry.get("role") != "assistant":
             continue
@@ -183,6 +195,11 @@ def get_session_context_usage(
     *,
     chat_log: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """
+    计算当前 Session 上下文占用（供圆环 API）。
+
+    优先最后一条 assistant 的 API prompt_tokens；无对话为 0；否则字符估算。
+    """
     mid = model_id or default_model_id()
     spec = get_model(mid)
     limit = spec.context_limit

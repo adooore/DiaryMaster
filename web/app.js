@@ -1,13 +1,18 @@
 const fileTreeEl = document.getElementById("file-tree");
+const panelTreeEl = document.getElementById("panel-tree");
+const fileContextMenuEl = document.getElementById("file-context-menu");
+const btnNewFile = document.getElementById("btn-new-file");
+const btnNewFolder = document.getElementById("btn-new-folder");
 const editorEl = document.getElementById("editor");
 const diffViewEl = document.getElementById("diff-view");
 const editorPreviewEl = document.getElementById("editor-preview");
 const currentFileLabel = document.getElementById("current-file-label");
 const btnSave = document.getElementById("btn-save");
-const btnModeEdit = document.getElementById("btn-mode-edit");
-const btnModePreview = document.getElementById("btn-mode-preview");
-const btnModeDiff = document.getElementById("btn-mode-diff");
-const diffStatsEl = document.getElementById("diff-stats");
+const btnViewEdit = document.getElementById("btn-view-edit");
+const btnViewPreview = document.getElementById("btn-view-preview");
+const btnViewDiff = document.getElementById("btn-view-diff");
+const panelEditorEl = document.getElementById("panel-editor");
+const EDITOR_VIEW_MODE_KEY = "diarymaster-editor-view-mode";
 const chatMessagesEl = document.getElementById("chat-messages");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
@@ -15,6 +20,13 @@ const btnSend = document.getElementById("btn-send");
 const btnNewSession = document.getElementById("btn-new-session");
 const sessionTabsEl = document.getElementById("session-tabs");
 const appTooltipEl = document.getElementById("app-tooltip");
+const btnSettings = document.getElementById("btn-settings");
+const btnSettingsClose = document.getElementById("btn-settings-close");
+const settingsOverlay = document.getElementById("settings-overlay");
+const settingsForm = document.getElementById("settings-form");
+const settingsApiKeyInput = document.getElementById("settings-api-key");
+const settingsApiKeyHint = document.getElementById("settings-api-key-hint");
+const btnSettingsClearKey = document.getElementById("btn-settings-clear-key");
 let appTooltipAnchor = null;
 const sessionHistoryListEl = document.getElementById("session-history-list");
 const panelHistoryEl = document.getElementById("panel-history");
@@ -31,20 +43,36 @@ const thinkingToggleEl = document.getElementById("thinking-toggle");
 const CONTEXT_RING_R = 8;
 const CONTEXT_RING_C = 2 * Math.PI * CONTEXT_RING_R;
 const MODEL_STORAGE_KEY = "diarymaster-model-id";
-const MODEL_STORAGE_KEY_LEGACY = "deepnote-model-id";
 const THINKING_STORAGE_KEY = "diarymaster-thinking-enabled";
-const THINKING_STORAGE_KEY_LEGACY = "deepnote-thinking-enabled";
 const LAYOUT_STORAGE_KEY = "diarymaster-layout-v1";
-const LAYOUT_STORAGE_KEY_LEGACY = "deepnote-layout-v1";
 const TABS_STORAGE_KEY = "diarymaster-open-tabs";
-const TABS_STORAGE_KEY_LEGACY = "deepnote-open-tabs";
 const HISTORY_OPEN_STORAGE_KEY = "diarymaster-history-open";
 const THEME_STORAGE_KEY = "diarymaster-theme";
-const THEME_STORAGE_KEY_LEGACY = "deepnote-theme";
 
-function readStorageItem(primary, legacy) {
+/** 将旧版 localStorage 键一次性迁移到 diarymaster-*（若存在） */
+function migrateLocalStorageKeys() {
+  const pairs = [
+    [MODEL_STORAGE_KEY, "deepnote-model-id"],
+    [THINKING_STORAGE_KEY, "deepnote-thinking-enabled"],
+    [LAYOUT_STORAGE_KEY, "deepnote-layout-v1"],
+    [TABS_STORAGE_KEY, "deepnote-open-tabs"],
+    [THEME_STORAGE_KEY, "deepnote-theme"],
+  ];
   try {
-    return localStorage.getItem(primary) || (legacy ? localStorage.getItem(legacy) : null);
+    for (const [current, old] of pairs) {
+      if (!localStorage.getItem(current) && localStorage.getItem(old)) {
+        localStorage.setItem(current, localStorage.getItem(old));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 从 localStorage 读取单项配置。 */
+function readStorageItem(key) {
+  try {
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
@@ -55,6 +83,8 @@ let defaultModelId = "deepseek-v4-flash";
 
 let currentFile = null;
 let viewMode = "edit";
+/** @type {"edit"|"preview"} 全局显示偏好，切换文件时保持 */
+let editorViewPreference = "edit";
 let fileSnapshots = {};
 let currentDiff = null;
 let sessionId = null;
@@ -74,12 +104,62 @@ function refreshEditorPreview() {
   const text = editorEl.value;
   if (!text.trim()) {
     editorPreviewEl.innerHTML =
-      '<p class="editor-preview-empty">暂无内容，请在「编辑」中输入 Markdown。</p>';
+      '<p class="editor-preview-empty">暂无内容。</p>';
     return;
   }
   editorPreviewEl.innerHTML = renderMarkdownToHtml(text);
 }
 
+/** 同步「编辑 / 预览 / 变更」三档互斥高亮（与 viewMode 一致）。 */
+function syncEditorViewSwitchUI() {
+  const mode = viewMode;
+  const hasDiff = Boolean(currentDiff);
+
+  btnViewEdit?.classList.toggle("active", mode === "edit");
+  btnViewPreview?.classList.toggle("active", mode === "preview");
+  btnViewDiff?.classList.toggle("active", mode === "diff");
+
+  btnViewEdit?.setAttribute("aria-pressed", mode === "edit" ? "true" : "false");
+  btnViewPreview?.setAttribute("aria-pressed", mode === "preview" ? "true" : "false");
+  btnViewDiff?.setAttribute("aria-pressed", mode === "diff" ? "true" : "false");
+
+  if (btnViewDiff) {
+    btnViewDiff.hidden = !hasDiff;
+    btnViewDiff.disabled = !hasDiff || !currentFile;
+  }
+
+  if (panelEditorEl) panelEditorEl.dataset.viewMode = mode;
+}
+
+/** 按全局偏好显示编辑区（退出 Diff 时用）。 */
+function applyContentViewFromPreference() {
+  setViewMode(editorViewPreference);
+}
+
+/** 切换显示模式：编辑 / 预览 / 变更（三档互斥）。 */
+function setEditorDisplayMode(mode) {
+  if (mode === "diff") {
+    if (!currentDiff) return;
+    setViewMode("diff");
+    return;
+  }
+
+  editorViewPreference = mode === "preview" ? "preview" : "edit";
+  try {
+    localStorage.setItem(EDITOR_VIEW_MODE_KEY, editorViewPreference);
+  } catch {
+    /* ignore */
+  }
+  setViewMode(editorViewPreference);
+}
+
+/** 打开文件时决定显示编辑、预览或 Diff。 */
+function resolveViewModeForOpen({ keepDiff = false } = {}) {
+  if (keepDiff && currentDiff) return "diff";
+  return editorViewPreference;
+}
+
+/** 切换编辑 / 预览 / Diff 视图。 */
 function setViewMode(mode) {
   viewMode = mode;
   const isEdit = mode === "edit";
@@ -90,32 +170,25 @@ function setViewMode(mode) {
   if (editorPreviewEl) editorPreviewEl.classList.toggle("hidden", !isPreview);
   diffViewEl.classList.toggle("hidden", !isDiff);
 
-  btnModeEdit.classList.toggle("active", isEdit);
-  if (btnModePreview) btnModePreview.classList.toggle("active", isPreview);
-  btnModeDiff.classList.toggle("active", isDiff);
-
-  btnSave.disabled = !currentFile || !isEdit;
+  const readOnly = isPreview || isDiff;
+  btnSave.disabled = !currentFile || readOnly;
 
   if (isPreview) refreshEditorPreview();
+  syncEditorViewSwitchUI();
 }
 
+/** 更新编辑器顶栏（保存、变更档可见性）。 */
 function updateEditorViewTabs() {
-  const hasFile = Boolean(currentFile);
-  btnModeEdit.disabled = !hasFile;
-  if (btnModePreview) btnModePreview.disabled = !hasFile;
-
-  const hasDiff = Boolean(currentDiff);
-  btnModeDiff.disabled = !hasFile || !hasDiff;
-  if (!hasDiff) {
-    diffStatsEl.classList.add("hidden");
-    if (viewMode === "diff") setViewMode("edit");
-  }
+  if (!currentDiff && viewMode === "diff") applyContentViewFromPreference();
+  else syncEditorViewSwitchUI();
 }
 
+/** 根据是否有 Diff 更新 Diff 标签可用状态。 */
 function updateDiffTabState() {
   updateEditorViewTabs();
 }
 
+/** 渲染左右对比的 Diff 视图。 */
 function renderDiff(oldText, newText) {
   if (typeof Diff === "undefined") {
     diffViewEl.textContent = "未加载 diff 库，请检查网络。";
@@ -170,17 +243,17 @@ function renderDiff(oldText, newText) {
   return { added, removed };
 }
 
+/** 显示指定变更的 Diff 并切换到 Diff 模式。 */
 function showDiff(oldText, newText, changeId = null) {
   currentDiff = { oldText, newText, changeId };
-  const { added, removed } = renderDiff(oldText, newText);
-  diffStatsEl.textContent = `+${added} -${removed}`;
-  diffStatsEl.classList.remove("hidden");
+  renderDiff(oldText, newText);
   updateDiffTabState();
   setViewMode("diff");
   selectedChangeId = changeId;
   renderChat();
 }
 
+/** 清空 Diff 状态并回到编辑模式。 */
 function clearDiff() {
   currentDiff = null;
   selectedChangeId = null;
@@ -189,6 +262,7 @@ function clearDiff() {
   renderChat();
 }
 
+/** 格式化文件变更元信息为展示文案。 */
 function formatChangeMeta(c) {
   const srcMap = { agent: "Agent", manual: "手动", rollback: "回退" };
   const src = srcMap[c.source] || c.source;
@@ -197,6 +271,7 @@ function formatChangeMeta(c) {
   return { src, lines: `${oldN}→${newN} 行` };
 }
 
+/** 构建单条文件变更的 DOM 行。 */
 function buildChangeRow(c) {
   const row = document.createElement("div");
   row.className = "chat-change-row";
@@ -223,6 +298,7 @@ function buildChangeRow(c) {
   return row;
 }
 
+/** 构建一轮对话的文件变更卡片 DOM。 */
 function createChangeBlockElement(turn, changes, { compact = false } = {}) {
   const block = document.createElement("div");
   block.className = "msg msg-changes";
@@ -243,6 +319,7 @@ function createChangeBlockElement(turn, changes, { compact = false } = {}) {
   return block;
 }
 
+/** 规范化后端返回的变更对象为前端结构。 */
 function normalizeChange(c) {
   const oldText = c.old_content ?? "";
   const newText = c.new_content ?? "";
@@ -258,6 +335,7 @@ function normalizeChange(c) {
   };
 }
 
+/** 从 chat_log 计算当前最大轮次号。 */
 function maxTurnFromChatLog(log) {
   let max = 0;
   for (const item of log) {
@@ -267,10 +345,12 @@ function maxTurnFromChatLog(log) {
   return max;
 }
 
+/** 计算下一条消息应使用的轮次号。 */
 function nextChatTurn() {
   return Math.max(sessionTurn, maxTurnFromChatLog(chatLog)) + 1;
 }
 
+/** 将 chat_log 按轮次分组为 UI 渲染结构。 */
 function groupChatLogIntoTurns(log) {
   const preamble = [];
   const byTurn = new Map();
@@ -299,6 +379,7 @@ function groupChatLogIntoTurns(log) {
   return { preamble, turns };
 }
 
+/** 配置 marked 渲染器选项。 */
 function configureMarkdownRenderer() {
   if (typeof marked === "undefined") return;
   marked.setOptions({
@@ -310,6 +391,7 @@ function configureMarkdownRenderer() {
 }
 configureMarkdownRenderer();
 
+/** 将 Markdown 文本转为 HTML。 */
 function renderMarkdownToHtml(text) {
   if (!text) return "";
   if (typeof marked === "undefined") {
@@ -347,6 +429,7 @@ const TOOL_LABELS = {
   agent: "agent",
 };
 
+/** 合并历史与进行中的 assistant 步骤列表。 */
 function effectiveAssistantSteps(item) {
   const steps = item.steps ? [...item.steps] : [];
   if (!item.reasoning) return steps;
@@ -363,6 +446,7 @@ function effectiveAssistantSteps(item) {
   ];
 }
 
+/** 按步骤 id 合并去重步骤列表。 */
 function mergeStepsById(steps) {
   const order = [];
   const map = new Map();
@@ -374,12 +458,14 @@ function mergeStepsById(steps) {
   return order.map((id) => map.get(id));
 }
 
+/** 返回步骤状态对应的图标字符。 */
 function stepStatusIcon(status) {
   if (status === "running") return "◌";
   if (status === "error") return "✕";
   return "✓";
 }
 
+/** 将步骤分为进行中与已完成两组。 */
 function partitionSteps(steps) {
   const merged = mergeStepsById(steps);
   const header = merged.filter((s) => s.kind === "reply_status");
@@ -387,6 +473,7 @@ function partitionSteps(steps) {
   return { main, header };
 }
 
+/** 判断步骤流是否已全部结束。 */
 function isStepsFlowComplete(steps) {
   const { header } = partitionSteps(steps);
   return header.some(
@@ -405,6 +492,7 @@ function resolveStepsCollapsed(item) {
   return Boolean(item.stepsCollapsed);
 }
 
+/** 创建单条 Agent 步骤的 DOM 行。 */
 function createAgentStepRow(step) {
   const row = document.createElement("div");
   const kind = step.kind || "tool";
@@ -443,6 +531,7 @@ function createAgentStepRow(step) {
   return row;
 }
 
+/** 构建 Agent 步骤列表容器 DOM。 */
 function buildAgentStepsElement(
   steps,
   { active = false, collapsed = false, onToggle = null } = {}
@@ -509,10 +598,12 @@ function buildAgentStepsElement(
   return wrap;
 }
 
+/** 查找进行中的 assistant 占位消息。 */
 function findPendingAssistant(pendingId) {
   return chatLog.find((m) => m._pending === pendingId);
 }
 
+/** 更新或插入一条 Agent 步骤到占位消息。 */
 function upsertAgentStep(pendingId, step) {
   const msg = findPendingAssistant(pendingId);
   if (!msg) return;
@@ -523,6 +614,7 @@ function upsertAgentStep(pendingId, step) {
   renderChat();
 }
 
+/** 完成 assistant 占位消息并写入最终回复。 */
 function finalizePendingAssistant(pendingId, { text, steps, reasoning }) {
   const msg = findPendingAssistant(pendingId);
   if (!msg) return;
@@ -536,6 +628,7 @@ function finalizePendingAssistant(pendingId, { text, steps, reasoning }) {
   renderChat();
 }
 
+/** 将单条消息 DOM 追加到聊天区。 */
 function appendMessageElement(parent, item) {
   const div = document.createElement("div");
   div.className = `msg ${item.role}`;
@@ -583,6 +676,7 @@ function appendMessageElement(parent, item) {
   parent.appendChild(div);
 }
 
+/** 根据 chatLog 重绘整个聊天区。 */
 function renderChat() {
   chatMessagesEl.innerHTML = "";
   const { preamble, turns } = groupChatLogIntoTurns(chatLog);
@@ -634,6 +728,7 @@ function renderChat() {
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 }
 
+/** 向 chatLog 追加一条 user/assistant 消息。 */
 function pushMessage(role, text, turn = null) {
   const entry = { type: "message", role, text };
   if (turn != null) entry.turn = turn;
@@ -641,6 +736,7 @@ function pushMessage(role, text, turn = null) {
   renderChat();
 }
 
+/** 向 chatLog 追加一轮文件变更块。 */
 function pushChangeBlock(turn, changes) {
   if (!changes || !changes.length) return;
   const normalized = changes.map(normalizeChange);
@@ -648,6 +744,7 @@ function pushChangeBlock(turn, changes) {
   renderChat();
 }
 
+/** 用 session.changes 同步 chatLog 中的变更块。 */
 function syncChatLogChangesFromSession() {
   const validIds = new Set(sessionChanges.map((c) => c.id));
   chatLog = chatLog
@@ -664,6 +761,7 @@ function syncChatLogChangesFromSession() {
   renderChat();
 }
 
+/** 为历史轮次重建文件变更卡片。 */
 function rebuildHistoricalChangeBlocks() {
   if (chatLog.length > 0) return;
   const byTurn = new Map();
@@ -677,6 +775,7 @@ function rebuildHistoricalChangeBlocks() {
   }
 }
 
+/** 处理回退 API 返回并刷新 UI。 */
 async function handleRollbackResult(data) {
   clearDiff();
   await loadSession();
@@ -693,9 +792,10 @@ async function handleRollbackResult(data) {
     editorEl.value = content;
     fileSnapshots[path] = content;
   }
-  setViewMode("edit");
+  applyContentViewFromPreference();
 }
 
+/** 请求回退到指定轮次之前。 */
 async function rollbackToTurn(turn) {
   const msg =
     `确定回退到第 ${turn} 轮之前？\n` +
@@ -711,6 +811,7 @@ async function rollbackToTurn(turn) {
   await handleRollbackResult(data);
 }
 
+/** 查看某条变更的 Diff。 */
 async function viewChange(changeId) {
   const res = await fetch(`/api/session/changes/${encodeURIComponent(changeId)}`);
   if (!res.ok) {
@@ -718,23 +819,34 @@ async function viewChange(changeId) {
     return;
   }
   const data = await res.json();
+  if (!isValidWorkspacePath(data.path)) {
+    alert("变更记录缺少有效文件路径");
+    return;
+  }
+  if (!fileExistsInTree(data.path)) {
+    alert(`文件已不存在于工作区：${data.path}`);
+    return;
+  }
   if (currentFile !== data.path) {
     await openFile(data.path, { keepDiff: true });
   }
   showDiff(data.old_content, data.new_content, changeId);
 }
 
+/** 获取当前 Session 标题。 */
 function getCurrentSessionTitle() {
   const s = sessionsList.find((x) => x.id === sessionId);
   return s?.title?.trim() || "新对话";
 }
 
+/** 格式化 token 数为千分位展示。 */
 function formatTokenCount(n) {
   if (n >= 10000) return `${(n / 1000).toFixed(1)}k`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
 }
 
+/** 更新底栏上下文占用圆环。 */
 function updateContextRing(ctx) {
   if (!sessionContextRingEl) return;
   const progress = sessionContextRingEl.querySelector(".context-ring-progress");
@@ -775,21 +887,24 @@ function updateContextRing(ctx) {
   else if (pct >= 80) sessionContextRingEl.classList.add("ctx-warn");
 }
 
+/** 更新 Session 元信息与上下文圆环。 */
 function updateSessionMeta(_sessions, _activeId, contextUsage) {
   if (contextUsage) updateContextRing(contextUsage);
 }
 
+/** 获取当前选中的模型 id。 */
 function getSelectedModelId() {
   if (composerModelId) return composerModelId;
   try {
     return (
-      readStorageItem(MODEL_STORAGE_KEY, MODEL_STORAGE_KEY_LEGACY) || defaultModelId
+      readStorageItem(MODEL_STORAGE_KEY) || defaultModelId
     );
   } catch {
     return defaultModelId;
   }
 }
 
+/** 设置输入区模型并可选持久化。 */
 function setComposerModelId(modelId, { persist = true } = {}) {
   const id = modelId || defaultModelId;
   composerModelId = id;
@@ -813,6 +928,7 @@ function setComposerModelId(modelId, { persist = true } = {}) {
   syncThinkingToggleForModel(id);
 }
 
+/** 打开或关闭模型选择下拉。 */
 function setModelPickerOpen(open) {
   if (!modelPickerEl || !modelPickerTrigger || !modelPickerMenu) return;
   const isOpen = Boolean(open);
@@ -822,19 +938,22 @@ function setModelPickerOpen(open) {
   modelPickerMenu.classList.toggle("hidden", !isOpen);
 }
 
+/** 切换模型选择下拉显示状态。 */
 function toggleModelPicker() {
   setModelPickerOpen(!modelPickerEl?.classList.contains("is-open"));
 }
 
+/** 读取是否开启思考模式。 */
 function isThinkingEnabled() {
   if (thinkingToggleEl) return thinkingToggleEl.checked;
   try {
-    return readStorageItem(THINKING_STORAGE_KEY, THINKING_STORAGE_KEY_LEGACY) === "1";
+    return readStorageItem(THINKING_STORAGE_KEY) === "1";
   } catch {
     return false;
   }
 }
 
+/** 按模型能力同步思考开关可用状态。 */
 function syncThinkingToggleForModel(modelId) {
   if (!thinkingToggleEl || !modelPickerEl) return;
   const spec = modelsCatalog.find((m) => m.id === modelId);
@@ -843,6 +962,7 @@ function syncThinkingToggleForModel(modelId) {
   if (!supported) thinkingToggleEl.checked = false;
 }
 
+/** 从 API 刷新当前 Session 上下文占用。 */
 async function refreshContextUsage() {
   const modelId = getSelectedModelId();
   const res = await fetch(
@@ -853,6 +973,7 @@ async function refreshContextUsage() {
   updateContextRing(ctx);
 }
 
+/** 用 chat done 事件中的 usage 更新圆环。 */
 function applyContextUsageFromDone(usage) {
   if (!usage?.prompt_tokens) {
     refreshContextUsage();
@@ -874,6 +995,7 @@ function applyContextUsageFromDone(usage) {
   });
 }
 
+/** 加载可选模型列表。 */
 async function loadModelsCatalog() {
   const res = await fetch("/api/models");
   if (!res.ok) return;
@@ -884,7 +1006,7 @@ async function loadModelsCatalog() {
   let saved = defaultModelId;
   try {
     saved =
-      readStorageItem(MODEL_STORAGE_KEY, MODEL_STORAGE_KEY_LEGACY) || defaultModelId;
+      readStorageItem(MODEL_STORAGE_KEY) || defaultModelId;
   } catch {
     /* ignore */
   }
@@ -911,12 +1033,13 @@ async function loadModelsCatalog() {
   setComposerModelId(saved, { persist: false });
 }
 
+/** 初始化输入区模型与思考偏好。 */
 function initComposerPrefs() {
   if (!thinkingToggleEl) return;
 
   try {
     thinkingToggleEl.checked =
-      readStorageItem(THINKING_STORAGE_KEY, THINKING_STORAGE_KEY_LEGACY) === "1";
+      readStorageItem(THINKING_STORAGE_KEY) === "1";
   } catch {
     thinkingToggleEl.checked = false;
   }
@@ -950,13 +1073,15 @@ function initComposerPrefs() {
   });
 }
 
+/** 格式化 Session 标题展示。 */
 function formatSessionTitle(s) {
   return (s?.title || "").trim() || "新对话";
 }
 
+/** 从 localStorage 恢复已打开文件标签。 */
 function loadOpenTabs() {
   try {
-    const raw = readStorageItem(TABS_STORAGE_KEY, TABS_STORAGE_KEY_LEGACY);
+    const raw = readStorageItem(TABS_STORAGE_KEY);
     openTabIds = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(openTabIds)) openTabIds = [];
   } catch {
@@ -964,6 +1089,7 @@ function loadOpenTabs() {
   }
 }
 
+/** 将已打开文件标签写入 localStorage。 */
 function saveOpenTabs() {
   try {
     localStorage.setItem(TABS_STORAGE_KEY, JSON.stringify(openTabIds));
@@ -972,12 +1098,14 @@ function saveOpenTabs() {
   }
 }
 
+/** 确保某文件在标签栏中打开。 */
 function ensureTabOpen(id) {
   if (!id || openTabIds.includes(id)) return;
   openTabIds.push(id);
   saveOpenTabs();
 }
 
+/** 移除已不存在的文件标签。 */
 function pruneOpenTabs() {
   const valid = new Set((sessionsList || []).map((s) => s.id));
   openTabIds = openTabIds.filter((id) => valid.has(id));
@@ -988,6 +1116,7 @@ function pruneOpenTabs() {
   saveOpenTabs();
 }
 
+/** 关闭文件标签并切换活动文件。 */
 function closeTab(id, ev) {
   ev?.stopPropagation();
   ev?.preventDefault();
@@ -1007,6 +1136,7 @@ function closeTab(id, ev) {
   }
 }
 
+/** 格式化 Session 创建时间为展示文案。 */
 function formatSessionDate(iso) {
   if (!iso) return "";
   try {
@@ -1023,6 +1153,7 @@ function formatSessionDate(iso) {
   }
 }
 
+/** 隐藏全局悬浮提示。 */
 function hideAppTooltip() {
   if (!appTooltipEl) return;
   appTooltipEl.classList.add("hidden");
@@ -1033,6 +1164,7 @@ function hideAppTooltip() {
   }
 }
 
+/** 根据锚点元素定位悬浮提示。 */
 function layoutAppTooltip(anchor, placement) {
   if (!appTooltipEl || !anchor) return;
   const gap = 8;
@@ -1053,6 +1185,7 @@ function layoutAppTooltip(anchor, placement) {
   appTooltipEl.style.setProperty("--arrow-x", `${Math.round(anchorCenterX - left)}px`);
 }
 
+/** 在锚点旁显示悬浮提示。 */
 function showAppTooltip(anchor, text, placement = "below") {
   if (!appTooltipEl || !anchor || !text) return;
   if (modelPickerEl?.classList.contains("is-open") && modelPickerEl.contains(anchor)) return;
@@ -1064,11 +1197,13 @@ function showAppTooltip(anchor, text, placement = "below") {
   anchor.setAttribute("aria-describedby", "app-tooltip");
 }
 
+/** 从事件目标解析 tooltip 宿主元素。 */
 function tooltipHostFromTarget(target) {
   if (!target?.closest) return null;
   return target.closest("[data-tooltip]");
 }
 
+/** 将原生 title 迁移为自定义 tooltip。 */
 function migrateNativeTitles(root = document) {
   root.querySelectorAll("[title]").forEach((el) => {
     const native = el.getAttribute("title")?.trim();
@@ -1078,6 +1213,7 @@ function migrateNativeTitles(root = document) {
   });
 }
 
+/** 初始化全局 tooltip 行为。 */
 function initAppTooltip() {
   if (!appTooltipEl) return;
   migrateNativeTitles();
@@ -1112,6 +1248,7 @@ function initAppTooltip() {
   window.addEventListener("resize", hideAppTooltip);
 }
 
+/** 渲染顶栏 Session 标签。 */
 function renderSessionTabs() {
   if (!sessionTabsEl) return;
   hideAppTooltip();
@@ -1160,6 +1297,7 @@ function renderSessionTabs() {
   }
 }
 
+/** 渲染历史 Session 侧栏列表。 */
 function renderHistoryList() {
   if (!sessionHistoryListEl) return;
   sessionHistoryListEl.innerHTML = "";
@@ -1224,12 +1362,14 @@ function renderHistoryList() {
   }
 }
 
+/** 从历史列表切换 Session。 */
 async function selectSessionFromHistory(id) {
   ensureTabOpen(id);
   if (id !== sessionId) await activateSession(id);
   else syncSessionsUI();
 }
 
+/** 删除指定 Session。 */
 async function deleteSession(targetId) {
   const res = await fetch(`/api/session/${encodeURIComponent(targetId)}`, {
     method: "DELETE",
@@ -1246,11 +1386,10 @@ async function deleteSession(targetId) {
   clearDiff();
   applySessionPayload(data);
   await loadFileTree();
-  if (currentFile) {
-    await openFile(currentFile, { keepDiff: false });
-  }
+  await reopenCurrentFileAfterTreeLoad();
 }
 
+/** 重命名指定 Session。 */
 async function renameSession(targetId) {
   const s = sessionsList.find((x) => x.id === targetId);
   const current = formatSessionTitle(s);
@@ -1278,6 +1417,7 @@ async function renameSession(targetId) {
   }
 }
 
+/** 打开或关闭历史侧栏。 */
 function setHistoryPanelOpen(open) {
   historyPanelOpen = Boolean(open);
   if (!layoutEl) return;
@@ -1310,10 +1450,12 @@ function setHistoryPanelOpen(open) {
   clampLayoutWidths();
 }
 
+/** 切换历史侧栏显示。 */
 function toggleHistoryPanel() {
   setHistoryPanelOpen(!historyPanelOpen);
 }
 
+/** 应用 sessions 列表与激活 id 到 UI。 */
 function applySessionsList(sessions, activeId, contextUsage) {
   sessionsList = sessions || [];
   const active = activeId || sessionId;
@@ -1324,19 +1466,22 @@ function applySessionsList(sessions, activeId, contextUsage) {
   updateSessionMeta(sessionsList, active, contextUsage);
 }
 
+/** 同步 Session 相关 UI 组件。 */
 function syncSessionsUI() {
   applySessionsList(sessionsList, sessionId);
 }
 
+/** 切换 Session 后同步 Diff 状态。 */
 function syncDiffWithSession() {
   if (!currentDiff?.changeId) return;
   const stillExists = sessionChanges.some((c) => c.id === currentDiff.changeId);
   if (!stillExists) {
     clearDiff();
-    if (currentFile) setViewMode("edit");
+    if (currentFile) applyContentViewFromPreference();
   }
 }
 
+/** 应用 /api/session 返回的会话数据。 */
 function applySessionPayload(data) {
   sessionId = data.id || data.session_id;
   sessionTurn = Number(data.turn) || 0;
@@ -1358,6 +1503,7 @@ function applySessionPayload(data) {
   refreshContextUsage();
 }
 
+/** 加载当前激活 Session。 */
 async function loadSession() {
   const res = await fetch("/api/session");
   if (!res.ok) return;
@@ -1365,6 +1511,7 @@ async function loadSession() {
   applySessionPayload(data);
 }
 
+/** 激活指定 Session 并刷新界面。 */
 async function activateSession(targetId) {
   if (!targetId || targetId === sessionId) {
     ensureTabOpen(targetId);
@@ -1384,11 +1531,23 @@ async function activateSession(targetId) {
   clearDiff();
   applySessionPayload(data);
   await loadFileTree();
-  if (currentFile) {
+  await reopenCurrentFileAfterTreeLoad();
+}
+
+/** 文件树加载后尝试重新打开当前文件，否则打开第一个文件。 */
+async function reopenCurrentFileAfterTreeLoad() {
+  reconcileEditorWithFileTree();
+  if (currentFile && fileExistsInTree(currentFile)) {
     await openFile(currentFile, { keepDiff: false });
+    return;
+  }
+  const firstFile = fileTreeEl?.querySelector("li.file-tree-file");
+  if (firstFile?.dataset.path) {
+    await openFile(firstFile.dataset.path, { silent: true });
   }
 }
 
+/** 新建 Session 并切换过去。 */
 async function newSession() {
   const res = await fetch("/api/session/new", { method: "POST" });
   if (!res.ok) {
@@ -1399,33 +1558,427 @@ async function newSession() {
   await loadSession();
 }
 
-async function loadFileTree() {
-  const res = await fetch("/api/files");
-  const data = await res.json();
-  fileTreeEl.innerHTML = "";
-  for (const path of data.files || []) {
-    const li = document.createElement("li");
-    li.textContent = path;
-    li.dataset.path = path;
-    if (path === currentFile) li.classList.add("active");
-    li.addEventListener("click", () => openFile(path));
-    fileTreeEl.appendChild(li);
+/** 规范化工作区相对路径。 */
+function normalizeWorkspacePath(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/");
+}
+
+/** 在文件树中展开并滚动到指定文件。 */
+function revealFileInTree(path) {
+  if (!fileTreeEl || !path) return;
+  const fileLi = [...fileTreeEl.querySelectorAll(".file-tree-file")].find(
+    (li) => li.dataset.path === path
+  );
+  if (!fileLi) return;
+  let dir = fileLi.closest(".file-tree-dir");
+  while (dir) {
+    dir.classList.remove("collapsed");
+    dir.setAttribute("aria-expanded", "true");
+    const parentItem = dir.parentElement?.closest(".file-tree-dir");
+    dir = parentItem || null;
   }
 }
 
+/** 高亮文件树中的当前文件。 */
+function highlightFileInTree(path) {
+  document.querySelectorAll(".file-tree-file").forEach((li) => {
+    li.classList.toggle("active", li.dataset.path === path);
+  });
+}
+
+const FILE_TREE_INDENT_PX = 16;
+
+/**
+ * 构建文件树一行。
+ * 文件夹：缩进 + ▸ + 图标 + 名称
+ * 文件：缩进 + 标记（·，占 ▸ 列，无空白箭头槽）+ 名称 —— 与同级文件夹左缘对齐
+ */
+function buildFileTreeRow(depth, { isDir, icon, name }) {
+  const row = document.createElement("div");
+  row.className = isDir ? "file-tree-row file-tree-row--dir" : "file-tree-row file-tree-row--file";
+
+  const indent = document.createElement("span");
+  indent.className = "file-tree-indent";
+  indent.setAttribute("aria-hidden", "true");
+  if (depth > 0) indent.style.width = `${depth * FILE_TREE_INDENT_PX}px`;
+  row.appendChild(indent);
+
+  if (isDir) {
+    const chevronEl = document.createElement("span");
+    chevronEl.className = "file-tree-chevron";
+    chevronEl.setAttribute("aria-hidden", "true");
+    chevronEl.textContent = "▸";
+    row.appendChild(chevronEl);
+
+    const iconEl = document.createElement("span");
+    iconEl.className = "file-tree-icon";
+    iconEl.setAttribute("aria-hidden", "true");
+    iconEl.textContent = icon;
+    row.appendChild(iconEl);
+  } else {
+    const lead = document.createElement("span");
+    lead.className = "file-tree-lead";
+    lead.setAttribute("aria-hidden", "true");
+    lead.textContent = icon;
+    row.appendChild(lead);
+  }
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "file-tree-name";
+  nameEl.textContent = name;
+  row.appendChild(nameEl);
+
+  return row;
+}
+
+/** 递归渲染文件树节点 DOM；depth 为层级（0 = workspace 根）。 */
+function renderFileTreeNodes(nodes, parentEl, depth = 0) {
+  for (const node of nodes || []) {
+    const li = document.createElement("li");
+
+    if (node.type === "dir") {
+      li.className = "file-tree-item file-tree-dir collapsed";
+      li.dataset.path = node.path || "";
+      li.setAttribute("role", "treeitem");
+      li.setAttribute("aria-expanded", "false");
+      const row = buildFileTreeRow(depth, {
+        isDir: true,
+        icon: "▤",
+        name: node.name,
+      });
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const collapsed = li.classList.toggle("collapsed");
+        li.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      });
+      const childUl = document.createElement("ul");
+      childUl.className = "file-tree-children";
+      childUl.setAttribute("role", "group");
+      renderFileTreeNodes(node.children || [], childUl, depth + 1);
+      li.appendChild(row);
+      li.appendChild(childUl);
+    } else {
+      li.className = "file-tree-item file-tree-file";
+      li.setAttribute("role", "treeitem");
+      li.dataset.path = node.path;
+      if (node.path === currentFile) li.classList.add("active");
+      const row = buildFileTreeRow(depth, {
+        isDir: false,
+        icon: "·",
+        name: node.name,
+      });
+      row.addEventListener("click", () => openFile(node.path));
+      li.appendChild(row);
+    }
+    parentEl.appendChild(li);
+  }
+}
+
+/** 从 API 加载并渲染工作区文件树。 */
+async function loadFileTree() {
+  if (!fileTreeEl) return;
+  const res = await fetch("/api/files");
+  if (!res.ok) return;
+  const data = await res.json();
+  fileTreeEl.innerHTML = "";
+  const tree = data.tree || [];
+  if (!tree.length) {
+    const empty = document.createElement("li");
+    empty.className = "file-tree-empty";
+    empty.textContent = "暂无文件。点击 + 新建笔记，或 ▤ 新建文件夹。";
+    fileTreeEl.appendChild(empty);
+    return;
+  }
+  renderFileTreeNodes(tree, fileTreeEl);
+  reconcileEditorWithFileTree();
+  if (currentFile && fileExistsInTree(currentFile)) {
+    highlightFileInTree(currentFile);
+    revealFileInTree(currentFile);
+  }
+}
+
+/** 将用户输入的路径与父目录合并为工作区相对路径。 */
+function resolveWorkspaceRelativePath(input, baseDir) {
+  let path = normalizeWorkspacePath(input);
+  if (!path) return "";
+  const base = normalizeWorkspacePath(baseDir);
+  if (base && !path.includes("/")) path = `${base}/${path}`;
+  return path;
+}
+
+/** 从右键目标解析：父目录、选中路径、类型（file/dir/null）。 */
+function resolveFileTreeContextTarget(target) {
+  const item = target?.closest?.(".file-tree-item");
+  if (!item) return { baseDir: "", path: "", type: null };
+  if (item.classList.contains("file-tree-file")) {
+    const path = item.dataset.path || "";
+    const slash = path.lastIndexOf("/");
+    return {
+      baseDir: slash >= 0 ? path.slice(0, slash) : "",
+      path,
+      type: "file",
+    };
+  }
+  if (item.classList.contains("file-tree-dir")) {
+    const path = item.dataset.path || "";
+    return { baseDir: path, path, type: "dir" };
+  }
+  return { baseDir: "", path: "", type: null };
+}
+
+/** 在工作区新建文件；baseDir 为可选父目录（右键菜单传入）。 */
+async function createWorkspaceFile(baseDir = "") {
+  const suggested = baseDir
+    ? `${normalizeWorkspacePath(baseDir)}/新笔记.md`
+    : "新笔记.md";
+  const raw = window.prompt(
+    "新建文件路径（相对 workspace）\n例如：2025-05-20.md 或 notes/日记.md",
+    suggested
+  );
+  if (raw == null) return;
+  let path = resolveWorkspaceRelativePath(raw, baseDir);
+  if (!path) return;
+  const base = path.split("/").pop() || "";
+  if (!/\.\w+$/.test(base)) path += ".md";
+
+  const res = await fetch("/api/files/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, content: "" }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert("新建文件失败: " + (data.detail || res.statusText));
+    return;
+  }
+  await loadFileTree();
+  await openFile(data.path || path);
+}
+
+/** 在工作区新建文件夹；baseDir 为可选父目录（右键菜单传入）。 */
+async function createWorkspaceFolder(baseDir = "") {
+  const suggested = baseDir
+    ? `${normalizeWorkspacePath(baseDir)}/新建文件夹`
+    : "新建文件夹";
+  const raw = window.prompt(
+    "新建文件夹路径（相对 workspace）\n例如：notes 或 notes/周报",
+    suggested
+  );
+  if (raw == null) return;
+  const path = resolveWorkspaceRelativePath(raw, baseDir);
+  if (!path) return;
+
+  const res = await fetch("/api/files/mkdir", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert("新建文件夹失败: " + (data.detail || res.statusText));
+    return;
+  }
+  await loadFileTree();
+  revealFileInTree(data.path || path);
+}
+
+/** 删除工作区文件或文件夹。 */
+async function deleteWorkspaceItem(path, type) {
+  if (!path) return;
+  const label = type === "dir" ? "文件夹" : "文件";
+  const msg =
+    type === "dir"
+      ? `确定删除文件夹「${path}」及其全部内容？\n此操作不可撤销。`
+      : `确定删除文件「${path}」？\n此操作不可撤销。`;
+  if (!window.confirm(msg)) return;
+
+  const res = await fetch(`/api/files/${encodeURIComponent(path)}`, {
+    method: "DELETE",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(`删除${label}失败: ` + (data.detail || res.statusText));
+    return;
+  }
+
+  const deleted = data.path || path;
+  if (
+    currentFile === deleted ||
+    (type === "dir" &&
+      currentFile &&
+      (currentFile === deleted || currentFile.startsWith(deleted + "/")))
+  ) {
+    clearEditorSelection();
+  }
+  await loadFileTree();
+}
+
+/** 初始化左侧文件面板交互。 */
+function initFilePanel() {
+  btnNewFile?.addEventListener("click", () => createWorkspaceFile());
+  btnNewFolder?.addEventListener("click", () => createWorkspaceFolder());
+}
+
+let fileContextBaseDir = "";
+let fileContextTargetPath = "";
+let fileContextTargetType = null;
+
+/** 关闭文件树右键菜单。 */
+function hideFileContextMenu() {
+  fileContextMenuEl?.classList.add("hidden");
+}
+
+/** 在光标处显示文件树右键菜单。 */
+function showFileContextMenu(clientX, clientY, ctx) {
+  if (!fileContextMenuEl) return;
+  fileContextBaseDir = ctx.baseDir || "";
+  fileContextTargetPath = ctx.path || "";
+  fileContextTargetType = ctx.type || null;
+
+  const onTarget = Boolean(fileContextTargetPath);
+  fileContextMenuEl.dataset.mode = onTarget ? "target" : "blank";
+
+  const targetSection = fileContextMenuEl.querySelector(
+    '[data-menu-section="target"]'
+  );
+  if (targetSection) targetSection.hidden = !onTarget;
+
+  const deleteBtn = fileContextMenuEl.querySelector('[data-action="delete"]');
+  if (deleteBtn && onTarget) {
+    deleteBtn.textContent =
+      fileContextTargetType === "dir" ? "删除文件夹…" : "删除文件…";
+  }
+
+  fileContextMenuEl.classList.remove("hidden");
+  const pad = 8;
+  const rect = fileContextMenuEl.getBoundingClientRect();
+  let x = clientX;
+  let y = clientY;
+  if (x + rect.width > window.innerWidth - pad) {
+    x = Math.max(pad, window.innerWidth - rect.width - pad);
+  }
+  if (y + rect.height > window.innerHeight - pad) {
+    y = Math.max(pad, window.innerHeight - rect.height - pad);
+  }
+  fileContextMenuEl.style.left = `${x}px`;
+  fileContextMenuEl.style.top = `${y}px`;
+}
+
+/** 文件树区域右键：新建文件 / 新建文件夹。 */
+function initFileTreeContextMenu() {
+  if (!panelTreeEl || !fileContextMenuEl) return;
+
+  panelTreeEl.addEventListener("contextmenu", (e) => {
+    if (!panelTreeEl.contains(e.target)) return;
+    hideAppTooltip();
+    hideFileContextMenu();
+    const ctx = resolveFileTreeContextTarget(e.target);
+    showFileContextMenu(e.clientX, e.clientY, ctx);
+  });
+
+  fileContextMenuEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn || btn.hidden || btn.closest("[hidden]")) return;
+    e.stopPropagation();
+    const base = fileContextBaseDir;
+    const targetPath = fileContextTargetPath;
+    const targetType = fileContextTargetType;
+    hideFileContextMenu();
+    const action = btn.dataset.action;
+    if (action === "new-file") createWorkspaceFile(base);
+    else if (action === "new-folder") createWorkspaceFolder(base);
+    else if (action === "delete") deleteWorkspaceItem(targetPath, targetType);
+  });
+
+  document.addEventListener("click", (e) => {
+    if (fileContextMenuEl.classList.contains("hidden")) return;
+    if (fileContextMenuEl.contains(e.target)) return;
+    hideFileContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideFileContextMenu();
+  });
+  window.addEventListener("resize", hideFileContextMenu);
+  panelTreeEl.addEventListener("scroll", hideFileContextMenu, true);
+}
+
+/** 初始化右键菜单锁定逻辑。 */
+function initContextMenuLock() {
+  document.addEventListener(
+    "contextmenu",
+    (e) => {
+      e.preventDefault();
+    },
+    { capture: true }
+  );
+}
+
+/** 是否为可用的工作区相对路径。 */
+function isValidWorkspacePath(path) {
+  return Boolean(path && String(path) !== "undefined");
+}
+
+/** 判断路径是否仍在左侧文件树中（与磁盘 list_tree 一致）。 */
+function fileExistsInTree(path) {
+  if (!fileTreeEl || !isValidWorkspacePath(path)) return false;
+  return [...fileTreeEl.querySelectorAll(".file-tree-file")].some(
+    (li) => li.dataset.path === path
+  );
+}
+
+/** 清空编辑器选中状态（文件已删除或路径无效时）。 */
+function clearEditorSelection() {
+  currentFile = null;
+  editorEl.value = "";
+  currentFileLabel.textContent = "未选择文件";
+  clearDiff();
+  btnSave.disabled = true;
+  updateEditorViewTabs();
+  document.querySelectorAll(".file-tree-file").forEach((li) => {
+    li.classList.remove("active");
+  });
+}
+
+/** 文件树刷新后：当前打开的文件若已不在树中则重置 UI。 */
+function reconcileEditorWithFileTree() {
+  if (!currentFile) return;
+  if (fileExistsInTree(currentFile)) return;
+  clearEditorSelection();
+}
+
+/** 从 API 读取文件内容。 */
 async function fetchFileContent(path) {
+  if (!isValidWorkspacePath(path)) {
+    throw new Error("无效的文件路径");
+  }
   const res = await fetch(`/api/files/${encodeURIComponent(path)}`);
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {
+      detail = await res.text().catch(() => detail);
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
   return (await res.json()).content;
 }
 
+/** 打开文件到编辑器并更新标签。 */
 async function openFile(path, options = {}) {
-  const { keepDiff = false } = options;
+  if (!isValidWorkspacePath(path)) return;
+  const { keepDiff = false, silent = false } = options;
   let content;
   try {
     content = await fetchFileContent(path);
   } catch (e) {
-    alert("读取失败: " + e.message);
+    if (currentFile === path) clearEditorSelection();
+    if (!silent) alert("读取失败: " + e.message);
     return;
   }
 
@@ -1436,16 +1989,19 @@ async function openFile(path, options = {}) {
 
   if (!keepDiff) clearDiff();
 
-  document.querySelectorAll(".file-tree li").forEach((li) => {
-    li.classList.toggle("active", li.dataset.path === path);
-  });
+  highlightFileInTree(path);
+  revealFileInTree(path);
 
-  btnSave.disabled = false;
   updateEditorViewTabs();
-  setViewMode(keepDiff && currentDiff ? "diff" : "edit");
+  setViewMode(resolveViewModeForOpen({ keepDiff }));
 }
 
+/** 将文件内容应用为该路径最新变更版本。 */
 async function applyLatestChangeForFile(path, changes) {
+  if (!isValidWorkspacePath(path) || !fileExistsInTree(path)) {
+    alert(`文件已不存在于工作区：${path || "（路径无效）"}`);
+    return;
+  }
   const forFile = changes.filter((c) => c.path === path);
   if (!forFile.length) return;
   const latest = forFile[forFile.length - 1];
@@ -1462,6 +2018,7 @@ async function applyLatestChangeForFile(path, changes) {
   showDiff(oldContent, newContent, latest.id);
 }
 
+/** 保存当前编辑器内容到工作区。 */
 async function saveFile() {
   if (!currentFile) return;
   const before = editorEl.value;
@@ -1488,6 +2045,7 @@ async function saveFile() {
   }
 }
 
+/** 消费 SSE 聊天流并更新 UI。 */
 async function consumeChatStream(response, pendingId, pendingTurn) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -1538,6 +2096,7 @@ async function consumeChatStream(response, pendingId, pendingTurn) {
   return donePayload;
 }
 
+/** 一轮对话结束后刷新会话与文件状态。 */
 async function afterChatDone(data) {
   sessionId = data.session_id;
   sessionTurn = data.turn ?? sessionTurn;
@@ -1545,20 +2104,18 @@ async function afterChatDone(data) {
   await loadFileTree();
 
   if (data.written_files && data.written_files.length) {
-    const written = data.written_files;
+    const written = data.written_files.filter((p) => isValidWorkspacePath(p));
     const focus =
-      currentFile && written.includes(currentFile)
+      currentFile && written.includes(currentFile) && fileExistsInTree(currentFile)
         ? currentFile
-        : written.length === 1
-          ? written[0]
-          : null;
+        : written.find((p) => fileExistsInTree(p)) || null;
 
     if (focus && data.changes && data.changes.length) {
       await applyLatestChangeForFile(focus, data.changes);
     } else if (focus) {
       clearDiff();
       await openFile(focus);
-      setViewMode("edit");
+      applyContentViewFromPreference();
     }
   } else {
     syncDiffWithSession();
@@ -1624,9 +2181,16 @@ chatForm.addEventListener("submit", async (e) => {
 });
 
 btnSave.addEventListener("click", saveFile);
-btnModeEdit.addEventListener("click", () => currentFile && setViewMode("edit"));
-btnModePreview?.addEventListener("click", () => currentFile && setViewMode("preview"));
-btnModeDiff.addEventListener("click", () => currentDiff && setViewMode("diff"));
+
+/** 初始化编辑 / 预览 / 变更三档切换。 */
+function initEditorViewMode() {
+  const saved = readStorageItem(EDITOR_VIEW_MODE_KEY);
+  editorViewPreference = saved === "preview" ? "preview" : "edit";
+  btnViewEdit?.addEventListener("click", () => setEditorDisplayMode("edit"));
+  btnViewPreview?.addEventListener("click", () => setEditorDisplayMode("preview"));
+  btnViewDiff?.addEventListener("click", () => setEditorDisplayMode("diff"));
+  syncEditorViewSwitchUI();
+}
 
 btnSessionHistory?.addEventListener("click", () => toggleHistoryPanel());
 
@@ -1636,6 +2200,108 @@ btnNewSession.addEventListener("click", async () => {
 
 const VALID_THEMES = ["dark", "blossom"];
 
+/** 打开或关闭设置弹层。 */
+function setSettingsOpen(open) {
+  if (!settingsOverlay) return;
+  const on = Boolean(open);
+  settingsOverlay.classList.toggle("hidden", !on);
+  settingsOverlay.setAttribute("aria-hidden", on ? "false" : "true");
+  if (on) {
+    hideAppTooltip();
+    loadSettingsIntoForm();
+    settingsApiKeyInput?.focus();
+  }
+}
+
+/** 加载 API Key 配置状态到设置表单。 */
+async function loadSettingsIntoForm() {
+  if (!settingsApiKeyInput || !settingsApiKeyHint) return;
+  settingsApiKeyInput.value = "";
+  try {
+    const res = await fetch("/api/settings");
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    if (data.configured && data.masked) {
+      settingsApiKeyHint.textContent = `已配置：${data.masked}（留空并保存则不会修改；点「清除密钥」可删除）`;
+      settingsApiKeyHint.className = "settings-hint ok";
+      settingsApiKeyInput.placeholder = "输入新密钥以替换…";
+    } else {
+      settingsApiKeyHint.textContent = "尚未配置 API Key，对话将无法调用模型。";
+      settingsApiKeyHint.className = "settings-hint warn";
+      settingsApiKeyInput.placeholder = "sk-…";
+    }
+  } catch {
+    settingsApiKeyHint.textContent = "无法读取设置状态";
+    settingsApiKeyHint.className = "settings-hint warn";
+  }
+}
+
+/** 保存或清除 API Key 到后端。 */
+async function saveSettingsApiKey(apiKey) {
+  const res = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail || res.statusText || "保存失败");
+  }
+  return data;
+}
+
+/** 绑定设置弹层相关事件。 */
+function initSettings() {
+  if (!settingsOverlay || !settingsForm) return;
+
+  btnSettings?.addEventListener("click", () => setSettingsOpen(true));
+  btnSettingsClose?.addEventListener("click", () => setSettingsOpen(false));
+  settingsOverlay.addEventListener("click", (e) => {
+    if (e.target === settingsOverlay) setSettingsOpen(false);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && settingsOverlay && !settingsOverlay.classList.contains("hidden")) {
+      setSettingsOpen(false);
+    }
+  });
+
+  btnSettingsClearKey?.addEventListener("click", async () => {
+    if (!confirm("确定清除本机保存的 API Key？")) return;
+    try {
+      await saveSettingsApiKey("");
+      settingsApiKeyInput.value = "";
+      await loadSettingsIntoForm();
+    } catch (err) {
+      alert("清除失败: " + (err.message || err));
+    }
+  });
+
+  settingsForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const value = settingsApiKeyInput?.value?.trim() || "";
+    const hasExisting =
+      settingsApiKeyHint?.classList.contains("ok");
+    if (!value && !hasExisting) {
+      alert("请粘贴 DeepSeek API Key");
+      return;
+    }
+    if (!value) {
+      setSettingsOpen(false);
+      return;
+    }
+    try {
+      await saveSettingsApiKey(value);
+      settingsApiKeyInput.value = "";
+      await loadSettingsIntoForm();
+      setSettingsOpen(false);
+    } catch (err) {
+      alert("保存失败: " + (err.message || err));
+    }
+  });
+}
+
+/** 初始化主题切换与持久化。 */
 function initTheme() {
   const root = document.documentElement;
   const buttons = document.querySelectorAll(".theme-btn[data-theme]");
@@ -1656,7 +2322,7 @@ function initTheme() {
     });
   }
 
-  const saved = readStorageItem(THEME_STORAGE_KEY, THEME_STORAGE_KEY_LEGACY);
+  const saved = readStorageItem(THEME_STORAGE_KEY);
   apply(saved || root.getAttribute("data-theme") || "dark");
 
   buttons.forEach((btn) => {
@@ -1664,10 +2330,12 @@ function initTheme() {
   });
 }
 
+/** 将数值限制在 [min, max] 范围内。 */
 function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** 从布局元素 CSS 变量读取像素值。 */
 function readCssPx(layoutEl, name, fallback) {
   const raw = getComputedStyle(layoutEl).getPropertyValue(name).trim();
   if (!raw) return fallback;
@@ -1675,6 +2343,7 @@ function readCssPx(layoutEl, name, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** 将侧栏宽度持久化到 localStorage。 */
 function saveLayoutWidths(treePx, chatPx, historyPx) {
   try {
     const payload = {
@@ -1690,17 +2359,20 @@ function saveLayoutWidths(treePx, chatPx, historyPx) {
   }
 }
 
+/** 返回历史侧栏当前宽度（关闭时为 0）。 */
 function historyPanelWidthPx() {
   if (!layoutEl || !historyPanelOpen) return 0;
   return readCssPx(layoutEl, "--col-history", 0);
 }
 
+/** 返回当前可见的拖拽分隔条数量。 */
 function layoutHandleCount() {
   let n = 2;
   if (historyPanelOpen) n += 1;
   return n;
 }
 
+/** 限制三栏布局宽度在合理范围。 */
 function clampLayoutWidths() {
   if (!layoutEl) return;
   const treeMin = readCssPx(layoutEl, "--tree-min", 160);
@@ -1748,6 +2420,7 @@ function clampLayoutWidths() {
   }
 }
 
+/** 初始化侧栏拖拽调整宽度。 */
 function initLayoutResize() {
   if (!layoutEl) return;
 
@@ -1766,7 +2439,7 @@ function initLayoutResize() {
   let saved = {};
   try {
     saved = JSON.parse(
-      readStorageItem(LAYOUT_STORAGE_KEY, LAYOUT_STORAGE_KEY_LEGACY) || "{}"
+      readStorageItem(LAYOUT_STORAGE_KEY) || "{}"
     );
   } catch {
     saved = {};
@@ -1864,8 +2537,14 @@ function initLayoutResize() {
 }
 
 (async function init() {
+  migrateLocalStorageKeys();
   loadOpenTabs();
+  initContextMenuLock();
   initTheme();
+  initSettings();
+  initFilePanel();
+  initFileTreeContextMenu();
+  initEditorViewMode();
   initLayoutResize();
   initAppTooltip();
   initComposerPrefs();
@@ -1875,6 +2554,5 @@ function initLayoutResize() {
     setHistoryPanelOpen(true);
   }
   await loadFileTree();
-  const first = fileTreeEl.querySelector("li");
-  if (first) await openFile(first.dataset.path);
+  await reopenCurrentFileAfterTreeLoad();
 })();

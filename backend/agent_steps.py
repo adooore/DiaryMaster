@@ -78,6 +78,7 @@ def format_step_detail(tool: str | None, result: str) -> str:
 
 
 def _preview_read_file_detail(text: str) -> str:
+    """生成 read_file 工具结果在步骤面板中的截断预览。"""
     lines = text.splitlines()
     body = lines
     if len(lines) >= 2 and lines[0].startswith("---") and lines[-1].strip() == "---":
@@ -94,6 +95,7 @@ def _preview_read_file_detail(text: str) -> str:
 
 
 def _preview_list_files_detail(text: str) -> str:
+    """生成 list_files 工具结果在步骤面板中的截断预览。"""
     if text.startswith("（"):
         return text
     paths = [p for p in text.splitlines() if p.strip()]

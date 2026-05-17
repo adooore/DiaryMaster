@@ -1,12 +1,18 @@
+"""
+DiaryMaster FastAPI 入口：静态前端、工作区文件、Session、Agent 流式对话、设置。
+
+各路由函数 docstring 说明 HTTP 用途；业务逻辑在 agent / session_store / workspace_fs。
+"""
+
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
 
-_DEMO_ROOT = Path(__file__).resolve().parent.parent
-if str(_DEMO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_DEMO_ROOT))
+_APP_ROOT = Path(__file__).resolve().parent.parent
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -14,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend import agent, workspace_fs
-from backend.config import WEB_DIR
+from backend.config import WEB_DIR, api_key_status, bootstrap_api_key_from_disk, set_api_key
 from backend.context_usage import get_session_context_usage
 from backend.model_registry import default_model_id, list_models, validate_model_id
 from backend.session_store import store
@@ -23,6 +29,8 @@ app = FastAPI(title="DiaryMaster")
 
 
 class ChatRequest(BaseModel):
+    """POST /api/chat 与 /api/chat/stream 的请求体。"""
+
     message: str
     current_file: str | None = None
     model_id: str | None = None
@@ -30,6 +38,8 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """非流式对话的响应体。"""
+
     reply: str
     written_files: list[str]
     session_id: str
@@ -37,26 +47,75 @@ class ChatResponse(BaseModel):
     changes: list[dict]
 
 
+class FileCreateRequest(BaseModel):
+    """POST /api/files/create：新建 workspace 文件。"""
+
+    path: str
+    content: str = ""
+
+
+class DirCreateRequest(BaseModel):
+    """POST /api/files/mkdir：新建文件夹。"""
+
+    path: str
+
+
 class FileWriteRequest(BaseModel):
+    """（保留）文件写入请求体。"""
+
     content: str
 
 
 class ManualSaveRequest(BaseModel):
+    """PUT /api/files/{path}：编辑器保存。"""
+
     content: str
     record_change: bool = True
 
 
 class SessionTitleRequest(BaseModel):
+    """PATCH /api/session/{id}/title：重命名会话。"""
+
     title: str
+
+
+class SettingsUpdateRequest(BaseModel):
+    """PUT /api/settings：保存或清除 API Key。"""
+
+    api_key: str = ""
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    """应用启动：从 user_settings 注入 API Key 到环境变量。"""
+    bootstrap_api_key_from_disk()
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    """读取 API Key 配置状态（脱敏）。"""
+    return api_key_status()
+
+
+@app.put("/api/settings")
+def api_update_settings(body: SettingsUpdateRequest):
+    """保存或清除 DeepSeek API Key，并清空 Agent 缓存。"""
+    from backend.agent import clear_agent_cache
+
+    set_api_key(body.api_key)
+    clear_agent_cache()
+    return {"ok": True, **api_key_status()}
 
 
 @app.get("/api/models")
 def api_list_models():
+    """列出可选模型（V4 Flash / Pro 等）。"""
     return {"models": list_models(), "default_model_id": default_model_id()}
 
 
 @app.get("/api/session/context-usage")
 def api_session_context_usage(model_id: str | None = None):
+    """当前 Session 上下文占用（圆环）；query model_id 指定上限模型。"""
     mid = validate_model_id(model_id)
     session = store.get_session()
     return get_session_context_usage(
@@ -68,6 +127,7 @@ def api_session_context_usage(model_id: str | None = None):
 
 @app.get("/api/session")
 def api_get_session():
+    """当前激活 Session 的详情与 chat_log。"""
     info = agent.get_session_info()
     info["sessions"] = agent.list_sessions()
     info["active_id"] = store.active_id
@@ -76,6 +136,7 @@ def api_get_session():
 
 @app.get("/api/sessions")
 def api_list_sessions():
+    """所有 Session 摘要列表。"""
     from backend.session_store import store
 
     return {
@@ -86,6 +147,7 @@ def api_list_sessions():
 
 @app.post("/api/session/new")
 def api_new_session():
+    """新建空白 Session 并激活。"""
     from backend.session_store import store
 
     session_id = agent.new_session()
@@ -99,6 +161,7 @@ def api_new_session():
 
 @app.post("/api/session/{session_id}/activate")
 def api_activate_session(session_id: str):
+    """切换激活 Session，返回其完整信息。"""
     from backend.session_store import store
 
     try:
@@ -113,6 +176,7 @@ def api_activate_session(session_id: str):
 
 @app.get("/api/session/changes")
 def api_list_changes(path: str | None = None):
+    """当前 Session 的文件变更摘要；可选按 path 过滤。"""
     from backend.session_store import store
 
     changes = store.list_changes(path)
@@ -124,6 +188,7 @@ def api_list_changes(path: str | None = None):
 
 @app.get("/api/session/changes/{change_id}")
 def api_get_change(change_id: str):
+    """单条变更详情（含 old/new 全文，供 diff）。"""
     change = agent.get_change(change_id)
     if change is None:
         raise HTTPException(status_code=404, detail="变更记录不存在")
@@ -132,6 +197,7 @@ def api_get_change(change_id: str):
 
 @app.post("/api/session/turns/{turn}/rollback")
 def api_rollback_turn(turn: int):
+    """回退到指定轮次之前（含对话与文件）。"""
     try:
         from backend.session_store import store
 
@@ -155,6 +221,7 @@ def api_rollback_turn(turn: int):
 
 @app.post("/api/session/changes/{change_id}/rollback")
 def api_rollback_change(change_id: str):
+    """回退到某条变更所在轮次之前。"""
     try:
         from backend.session_store import store
 
@@ -180,6 +247,7 @@ def api_rollback_change(change_id: str):
 
 @app.post("/api/session/rollback/latest")
 def api_rollback_latest(path: str | None = None):
+    """回退最近一次变更（可限定 path）。"""
     try:
         from backend.session_store import store
 
@@ -205,11 +273,43 @@ def api_rollback_latest(path: str | None = None):
 
 @app.get("/api/files")
 def api_list_files():
-    return {"files": workspace_fs.list_files()}
+    """工作区文件扁平列表 + 树形结构（左侧文件栏）。"""
+    return {"files": workspace_fs.list_files(), "tree": workspace_fs.list_tree()}
+
+
+@app.post("/api/files/create")
+def api_create_file(body: FileCreateRequest):
+    """新建 workspace 文件。"""
+    try:
+        path = workspace_fs.create_file(body.path, body.content)
+        return {"ok": True, "path": path}
+    except workspace_fs.WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/files/mkdir")
+def api_create_directory(body: DirCreateRequest):
+    """新建 workspace 文件夹。"""
+    try:
+        path = workspace_fs.create_directory(body.path)
+        return {"ok": True, "path": path}
+    except workspace_fs.WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.delete("/api/files/{path:path}")
+def api_delete_path(path: str):
+    """删除 workspace 文件或文件夹（目录递归删除）。"""
+    try:
+        deleted = workspace_fs.delete_path(path)
+        return {"ok": True, "path": deleted}
+    except workspace_fs.WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/api/files/{path:path}")
 def api_read_file(path: str):
+    """读取 workspace 文件内容。"""
     try:
         content = workspace_fs.read_file(path)
         return {"path": path, "content": content}
@@ -219,6 +319,7 @@ def api_read_file(path: str):
 
 @app.put("/api/files/{path:path}")
 def api_write_file(path: str, body: ManualSaveRequest):
+    """保存文件；可选记录 manual 变更到当前 Session。"""
     from backend.session_store import store
 
     try:
@@ -270,6 +371,7 @@ def _persist_chat_turn(user_text: str, done: dict) -> str | None:
 
 @app.delete("/api/session/{session_id}")
 def api_delete_session(session_id: str):
+    """删除 Session（磁盘与内存）；若删的是当前则切换到其他 Session。"""
     try:
         active_id = agent.delete_session(session_id)
     except ValueError as e:
@@ -306,6 +408,7 @@ def api_set_session_title(session_id: str, body: SessionTitleRequest):
 
 @app.post("/api/chat", response_model=ChatResponse)
 def api_chat(req: ChatRequest):
+    """非流式对话（少用；前端主要用 stream）。"""
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="消息不能为空")
     try:
@@ -347,6 +450,7 @@ def api_chat_stream(req: ChatRequest):
         raise HTTPException(status_code=400, detail="消息不能为空")
 
     def generate():
+        """SSE 生成器：逐条推送 chat_stream 事件。"""
         user_text = req.message.strip()
         try:
             mid = validate_model_id(req.model_id)
@@ -397,6 +501,7 @@ def api_chat_reset():
 
 @app.get("/")
 def index():
+    """返回前端单页 index.html。"""
     return FileResponse(WEB_DIR / "index.html")
 
 

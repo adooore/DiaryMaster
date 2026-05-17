@@ -39,7 +39,7 @@
 ## 环境要求
 
 - Python 3.11+
-- [DeepSeek](https://platform.deepseek.com/) API Key（**系统环境变量**或项目根目录 `**.env`**，二选一或同时使用）
+- [DeepSeek](https://platform.deepseek.com/) API Key（在应用内 **设置** 中填写，或使用系统环境变量 `DEEPSEEK_API_KEY`）
 - 本机已安装 Git（可选，当前版本未集成 Git 功能）
 
 ---
@@ -61,51 +61,37 @@ pip install -r requirements.txt
 
 ### 3. 配置 API Key
 
-需要 [DeepSeek](https://platform.deepseek.com/) 的 API Key，变量名固定为 `**DEEPSEEK_API_KEY**`。任选一种方式即可（**已存在的系统环境变量优先**，`.env` 用来补充未设置的项）。
+在 [DeepSeek 开放平台](https://platform.deepseek.com/) 创建 API Key 后，任选一种方式：
 
-#### 方式 A：环境变量（推荐用于本机长期配置）
+#### 方式 A：应用内设置（推荐，无需改代码）
 
-**Windows PowerShell（当前终端有效）**
+1. 执行 `python run.py` 并打开浏览器
+2. 点击顶栏 **⚙ 设置**
+3. 粘贴 API Key 并 **保存**
+
+密钥保存在本机 `data/user_settings.json`（已在 `.gitignore` 的 `data/` 目录下，不会提交到 Git）。
+
+#### 方式 B：系统环境变量（可选，适合高级用户或脚本）
+
+仅在 **未** 于设置页保存密钥时生效：启动后进程会读取 `DEEPSEEK_API_KEY` 作为兜底。若 `data/user_settings.json` 里已有密钥，会**覆盖**进程内环境变量，设置页保存的内容优先。
+
+**Windows PowerShell（当前终端）**
 
 ```powershell
 $env:DEEPSEEK_API_KEY="你的密钥"
 python run.py
 ```
 
-**Windows 永久写入用户环境变量**
-
-```powershell
-[System.Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "你的密钥", "User")
-```
-
-设置后需**重新打开**终端 ，再执行 `python run.py`。
-
-**macOS / Linux（当前终端有效）**
+**macOS / Linux**
 
 ```bash
 export DEEPSEEK_API_KEY="你的密钥"
 python run.py
 ```
 
-写入 `~/.bashrc` 或 `~/.zshrc` 可长期生效：
-
-```bash
-export DEEPSEEK_API_KEY="你的密钥"
-```
-
-#### 方式 B：项目根目录 `.env` 文件
-
-在项目根目录（与 `run.py` 同级）新建 `.env`：
-
-```env
-DEEPSEEK_API_KEY=你的密钥
-```
-
-启动时程序会自动加载（依赖 `python-dotenv`）。`.env` 已在 `.gitignore` 中，**不要提交到 Git**。
-
 #### 检查是否生效
 
-启动后若右侧对话报错「未设置 DEEPSEEK_API_KEY」，说明变量未读到。可在项目根目录执行：
+启动后若对话提示未配置 API Key，请打开设置页保存，或检查环境变量。可在项目根目录执行：
 
 ```bash
 python -c "from backend.config import get_api_key; print('OK' if get_api_key() else 'MISSING')"
@@ -134,9 +120,9 @@ python run.py
 
 | 变量                 | 默认值         | 说明                               |
 | ------------------ | ----------- | -------------------------------- |
-| `DIARYMASTER_HOST` | `127.0.0.1` | 监听地址（兼容 `DEEPNOTE_HOST`）       |
-| `DIARYMASTER_PORT` | `8765`      | 端口（兼容 `DEEPNOTE_PORT`）           |
-| `DEEPSEEK_API_KEY` | —           | DeepSeek API 密钥（见上文「配置 API Key」） |
+| `DIARYMASTER_HOST` | `127.0.0.1` | 监听地址                             |
+| `DIARYMASTER_PORT` | `8765`      | 端口                                 |
+| `DEEPSEEK_API_KEY` | —           | DeepSeek API 密钥（可选；见「配置 API Key」，无本机设置时作为兜底） |
 
 
 示例（PowerShell 换端口）：
@@ -219,7 +205,7 @@ Agent 会先读取相关日记，再写入新文件。
 | 日记 Markdown       | `workspace/`              | 否      |
 | Session / 对话 / 变更 | `data/sessions/*.json`    | 否      |
 | 当前 Session ID     | `data/active_session.txt` | 否      |
-| API Key           | `.env`                    | 否      |
+| API Key           | `data/user_settings.json` | 否      |
 
 
 刷新页面或重启后端后，上述本地数据都会保留。

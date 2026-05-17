@@ -1,4 +1,4 @@
-"""推荐启动方式：在 demo 目录执行 python run.py"""
+"""推荐启动方式：在项目根目录执行 python run.py"""
 
 from __future__ import annotations
 

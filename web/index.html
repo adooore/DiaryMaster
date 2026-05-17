@@ -6,14 +6,21 @@
   <title>DiaryMaster</title>
   <script>
     (function () {
-      var t = localStorage.getItem("diarymaster-theme") || localStorage.getItem("deepnote-theme");
-      if (t === "dark" || t === "blossom") document.documentElement.setAttribute("data-theme", t);
+      try {
+        var k = "diarymaster-theme";
+        var prev = "deepnote-theme";
+        if (!localStorage.getItem(k) && localStorage.getItem(prev)) {
+          localStorage.setItem(k, localStorage.getItem(prev));
+        }
+        var t = localStorage.getItem(k);
+        if (t === "dark" || t === "blossom") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
     })();
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=17" />
+  <link rel="stylesheet" href="/static/style.css?v=30" />
 </head>
 <body>
   <header class="topbar">
@@ -22,21 +29,38 @@
       <button type="button" class="theme-btn active" data-theme="dark" aria-pressed="true" data-tooltip="深色 · 香槟金">深色</button>
       <button type="button" class="theme-btn" data-theme="blossom" aria-pressed="false" data-tooltip="浅色 · 白粉搭配">浅色</button>
     </div>
+    <button
+      type="button"
+      id="btn-settings"
+      class="icon-btn topbar-settings-btn"
+      data-tooltip="设置"
+      aria-label="设置"
+      aria-haspopup="dialog"
+    >⚙</button>
   </header>
   <main class="layout" id="app-layout">
     <aside class="panel panel-tree" id="panel-tree">
-      <div class="panel-title">文件</div>
-      <ul id="file-tree" class="file-tree"></ul>
+      <div class="panel-title file-panel-head">
+        <span>文件</span>
+        <div class="file-panel-actions">
+          <button type="button" id="btn-new-file" class="icon-btn" data-tooltip="新建文件" aria-label="新建文件">+</button>
+          <button type="button" id="btn-new-folder" class="icon-btn" data-tooltip="新建文件夹" aria-label="新建文件夹">▤</button>
+        </div>
+      </div>
+      <ul id="file-tree" class="file-tree" role="tree" aria-label="工作区文件"></ul>
     </aside>
     <div class="resize-handle" data-resize="tree-editor" role="separator" aria-orientation="vertical" aria-label="调整文件栏宽度" tabindex="0"></div>
     <section class="panel panel-editor" id="panel-editor">
       <div class="panel-title editor-toolbar">
-        <span id="current-file-label" class="serif-title">未选择文件</span>
-        <div class="toolbar-actions">
-          <span id="diff-stats" class="diff-stats hidden"></span>
-          <button type="button" id="btn-mode-edit" class="btn tab active" disabled>编辑</button>
-          <button type="button" id="btn-mode-preview" class="btn tab" disabled>预览</button>
-          <button type="button" id="btn-mode-diff" class="btn tab" disabled>变更</button>
+        <div class="editor-toolbar-start">
+          <span id="current-file-label" class="serif-title">未选择文件</span>
+          <div class="editor-view-switch" role="group" aria-label="编辑器显示模式">
+            <button type="button" id="btn-view-edit" class="view-mode-btn active" data-view-mode="edit" aria-pressed="true">编辑</button>
+            <button type="button" id="btn-view-preview" class="view-mode-btn" data-view-mode="preview" aria-pressed="false">预览</button>
+            <button type="button" id="btn-view-diff" class="view-mode-btn view-mode-btn--diff" data-view-mode="diff" aria-pressed="false" hidden>变更</button>
+          </div>
+        </div>
+        <div class="toolbar-actions editor-file-actions">
           <button type="button" id="btn-save" class="btn" disabled>保存</button>
         </div>
       </div>
@@ -132,10 +156,47 @@
       <ul id="session-history-list" class="session-history-list"></ul>
     </aside>
   </main>
+  <div id="settings-overlay" class="settings-overlay hidden" aria-hidden="true">
+    <div class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="settings-header">
+        <h2 id="settings-title" class="settings-title serif-title">设置</h2>
+        <button type="button" id="btn-settings-close" class="icon-btn" aria-label="关闭设置">×</button>
+      </div>
+      <form id="settings-form" class="settings-form">
+        <label class="settings-label" for="settings-api-key">DeepSeek API Key</label>
+        <input
+          type="password"
+          id="settings-api-key"
+          class="settings-input"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="sk-…"
+        />
+        <p id="settings-api-key-hint" class="settings-hint"></p>
+        <p class="settings-hint settings-hint-muted">
+          在 <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer">DeepSeek 开放平台</a> 创建密钥后粘贴保存。仅保存在本机，不会上传到 Git。
+        </p>
+        <div class="settings-actions">
+          <button type="button" id="btn-settings-clear-key" class="btn secondary">清除密钥</button>
+          <button type="submit" class="btn">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div id="file-context-menu" class="context-menu hidden" role="menu" aria-label="文件操作" data-mode="blank">
+    <div class="context-menu-section" data-menu-section="common">
+      <button type="button" class="context-menu-item" data-action="new-file" role="menuitem">新建文件…</button>
+      <button type="button" class="context-menu-item" data-action="new-folder" role="menuitem">新建文件夹…</button>
+    </div>
+    <div class="context-menu-section" data-menu-section="target" hidden>
+      <div class="context-menu-sep" role="separator" aria-hidden="true"></div>
+      <button type="button" class="context-menu-item context-menu-item--danger" data-action="delete" role="menuitem">删除…</button>
+    </div>
+  </div>
   <div id="app-tooltip" class="app-tooltip hidden" role="tooltip" aria-hidden="true"></div>
   <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=30"></script>
 </body>
 </html>
