@@ -23,6 +23,9 @@ const appTooltipEl = document.getElementById("app-tooltip");
 const btnSettings = document.getElementById("btn-settings");
 const btnSettingsClose = document.getElementById("btn-settings-close");
 const settingsOverlay = document.getElementById("settings-overlay");
+
+/** @type {{ pendingId: string, resolve: (approved: boolean) => void } | null} */
+let inlineConfirmWaiter = null;
 const settingsForm = document.getElementById("settings-form");
 const settingsApiKeyInput = document.getElementById("settings-api-key");
 const settingsApiKeyHint = document.getElementById("settings-api-key-hint");
@@ -770,10 +773,67 @@ function appendMessageElement(parent, item) {
     }
   }
 
+  const confirmBar = buildInlineConfirmBar(item);
+  if (confirmBar) div.appendChild(confirmBar);
+
   const usageFooter = buildMessageUsageFooter(item);
   if (usageFooter) div.appendChild(usageFooter);
 
   parent.appendChild(div);
+}
+
+/** 构造消息底部的内联危险操作确认条。 */
+function buildInlineConfirmBar(item) {
+  const req = item._confirmRequest;
+  if (!req || item.role !== "assistant") return null;
+
+  const bar = document.createElement("div");
+  bar.className = "msg-inline-confirm";
+  bar.setAttribute("role", "group");
+  bar.setAttribute(
+    "aria-label",
+    req.tool === "delete_path" ? "确认删除" : "确认操作"
+  );
+
+  const text = document.createElement("p");
+  text.className = "msg-inline-confirm-text";
+  const brief =
+    req.tool === "delete_path"
+      ? `删除「${req.path || req.label}」？不可恢复。`
+      : req.detail || req.message || req.label || "是否继续？";
+  text.textContent = brief;
+  bar.appendChild(text);
+
+  const actions = document.createElement("div");
+  actions.className = "msg-inline-confirm-actions";
+
+  const btnCancel = document.createElement("button");
+  btnCancel.type = "button";
+  btnCancel.className = "msg-inline-confirm-btn";
+  btnCancel.textContent = "取消";
+  btnCancel.addEventListener("click", () => resolveInlineToolConfirm(false));
+
+  const btnOk = document.createElement("button");
+  btnOk.type = "button";
+  btnOk.className = "msg-inline-confirm-btn msg-inline-confirm-btn--danger";
+  btnOk.textContent = "确认";
+  btnOk.addEventListener("click", () => resolveInlineToolConfirm(true));
+
+  actions.appendChild(btnCancel);
+  actions.appendChild(btnOk);
+  bar.appendChild(actions);
+  return bar;
+}
+
+/** 结束内联确认等待（由确认条按钮触发）。 */
+function resolveInlineToolConfirm(approved) {
+  if (!inlineConfirmWaiter) return;
+  const { pendingId, resolve } = inlineConfirmWaiter;
+  inlineConfirmWaiter = null;
+  const msg = findPendingAssistant(pendingId);
+  if (msg) delete msg._confirmRequest;
+  renderChat();
+  resolve(approved);
 }
 
 /** 根据 chatLog 重绘整个聊天区。 */
@@ -2305,6 +2365,34 @@ async function saveFile() {
   }
 }
 
+/** 提交用户对危险工具确认的回应。 */
+async function submitToolConfirm(confirmId, approved) {
+  const res = await fetch("/api/chat/tool-confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm_id: confirmId, approved }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || res.statusText);
+  }
+}
+
+/** 在右侧对话气泡内展示危险操作确认，返回用户是否批准。 */
+function showInlineToolConfirm(pendingId, event) {
+  return new Promise((resolve) => {
+    const msg = findPendingAssistant(pendingId);
+    if (!msg) {
+      resolve(false);
+      return;
+    }
+    msg._confirmRequest = event;
+    inlineConfirmWaiter = { pendingId, resolve };
+    renderChat();
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  });
+}
+
 /** 消费 SSE 聊天流并更新 UI。 */
 async function consumeChatStream(response, pendingId, pendingTurn) {
   const reader = response.body.getReader();
@@ -2333,6 +2421,9 @@ async function consumeChatStream(response, pendingId, pendingTurn) {
       }
       if (event.type === "step") {
         upsertAgentStep(pendingId, event);
+      } else if (event.type === "confirm") {
+        const approved = await showInlineToolConfirm(pendingId, event);
+        await submitToolConfirm(event.confirm_id, approved);
       } else if (event.type === "error") {
         throw new Error(event.detail || "Agent 错误");
       } else if (event.type === "session_title") {

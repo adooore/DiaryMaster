@@ -24,6 +24,7 @@ from backend.config import WEB_DIR, api_key_status, bootstrap_api_key_from_disk,
 from backend.context_usage import get_session_context_usage
 from backend.model_registry import default_model_id, list_models, validate_model_id
 from backend.session_store import store
+from backend.tool_confirm import resolve_confirmation
 
 app = FastAPI(title="DiaryMaster")
 
@@ -35,6 +36,13 @@ class ChatRequest(BaseModel):
     current_file: str | None = None
     model_id: str | None = None
     thinking_enabled: bool = False
+
+
+class ToolConfirmRequest(BaseModel):
+    """POST /api/chat/tool-confirm：响应 Agent 危险工具确认弹窗。"""
+
+    confirm_id: str
+    approved: bool
 
 
 class ChatResponse(BaseModel):
@@ -441,6 +449,19 @@ def api_chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent 调用失败: {e}") from e
+
+
+@app.post("/api/chat/tool-confirm")
+def api_chat_tool_confirm(body: ToolConfirmRequest):
+    """用户确认或拒绝 Agent 发起的危险工具操作（须在同一条 SSE 连接进行中调用）。"""
+    if not body.confirm_id.strip():
+        raise HTTPException(status_code=400, detail="confirm_id 不能为空")
+    if not resolve_confirmation(body.confirm_id.strip(), body.approved):
+        raise HTTPException(
+            status_code=404,
+            detail="确认请求不存在或已过期（可能对话已结束）",
+        )
+    return {"ok": True, "approved": body.approved}
 
 
 @app.post("/api/chat/stream")

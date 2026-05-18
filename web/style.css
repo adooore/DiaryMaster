@@ -2015,6 +2015,67 @@ body.layout-resizing .resize-handle.dragging::after {
   display: none;
 }
 
+.msg-inline-confirm {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.msg-inline-confirm-text {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.msg-inline-confirm-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.msg-inline-confirm-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.msg-inline-confirm-btn:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.msg-inline-confirm-btn--danger {
+  border-color: rgba(196, 68, 68, 0.55);
+  color: #e88;
+  background: rgba(196, 68, 68, 0.12);
+}
+
+.msg-inline-confirm-btn--danger:hover {
+  background: rgba(196, 68, 68, 0.22);
+  border-color: #c44;
+}
+
+[data-theme="blossom"] .msg-inline-confirm-btn--danger {
+  color: #c53030;
+  background: rgba(197, 48, 48, 0.08);
+  border-color: rgba(197, 48, 48, 0.35);
+}
+
 .settings-panel {
   width: min(420px, 100%);
   max-height: min(90vh, 520px);

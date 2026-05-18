@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import datetime
@@ -43,9 +45,15 @@ from backend.reasoning_messages import (
     normalize_reasoning_on_messages,
 )
 from backend.session_store import FileChange, store
+from backend.tool_confirm import ConfirmRegistry, require_tool_confirmation, set_active_registry
 
 # 已有文件超过此行数时，write_file 会拒绝整篇覆盖，迫使模型用 edit_file。
 FULL_WRITE_MAX_LINES = 60
+
+# 执行前需用户在界面确认的工具名。
+DANGEROUS_TOOLS = frozenset({"delete_path"})
+
+_CHAT_STREAM_DONE = object()
 
 # 当前这一轮对话的临时状态（每轮 chat_stream 开始时清空）。
 _written_this_turn: list[str] = []  # 本轮 Agent 写过的文件路径
@@ -71,6 +79,14 @@ SYSTEM_PROMPT = f"""你是 DiaryMaster 的笔记助手，像朋友一样帮助�
 - 工作区可能有多篇笔记。用户消息里会附带「工作区文件列表」；需要某篇全文时用 read_file 读取。
 - 汇总、周总结、对比多篇笔记：先 list_files / read_file 读取源笔记，再 write_file 写入新的汇总文件（新文件用 write_file 合理）。
 - 未 read_file 读过的内容不要编造。
+
+整理与路径（**硬性规则**，违反会浪费 token 且可能改坏正文）：
+- 用户意图是**换位置、放进文件夹、重命名、归档、移动、剪切、迁移、挪到某目录**时 → **只能**用 move_path(source, destination)。**禁止**为完成移动而调用 read_file、write_file、edit_file；**禁止**「读出全文 → write_file 到新路径 → delete_path 旧路径」这类流程。
+- 用户意图是**复制、备份一份、拷贝**时 → **只能**用 copy_path(source, destination)。**禁止** read_file + write_file 复制内容。
+- **删除** → delete_path(path)；仅在用户明确要求删除时执行；执行前会弹出界面让用户确认，未确认则返回「已取消」。
+- **新建文件夹** → mkdir(path)；移入前目录不存在时先 mkdir，再 move_path。
+- 仅当用户要**改笔记里的文字内容**时才 read_file / edit_file / write_file；「整理文件位置」与「改正文」是两类任务，不要混用。
+- 移动/复制**不需要**先 read_file；move_path / copy_path 不读不写文件内容，路径正确即可直接调用。
 
 时间：
 - 涉及「今天」「昨天」「本周」「现在几点」等时间判断时，先调用 get_current_time 获取本机时间，不要猜测日期。"""
@@ -220,6 +236,17 @@ def _publish_agent_model_step(msg: AIMessage) -> None:
     )
 
 
+def _confirm_detail_for_tool(tool: str, label: str, path: str | None) -> str:
+    """生成危险操作确认弹窗的说明文案。"""
+    if tool == "delete_path":
+        target = path or label
+        return (
+            f"将永久删除「{target}」。"
+            "若为文件夹会递归删除其下全部内容；此操作无法通过对话回退恢复。"
+        )
+    return label or "请确认是否继续。"
+
+
 def _run_tool_step(tool: str, label: str, path: str | None, work: Callable[[], str]) -> str:
     """
     包装一次工具真实逻辑：先推送 running，执行 work()，再推送 done/error。
@@ -236,6 +263,27 @@ def _run_tool_step(tool: str, label: str, path: str | None, work: Callable[[], s
             "path": path,
         }
     )
+    if tool in DANGEROUS_TOOLS:
+        approved = require_tool_confirmation(
+            tool=tool,
+            label=label,
+            path=path,
+            detail=_confirm_detail_for_tool(tool, label, path),
+        )
+        if not approved:
+            result = f"已取消：用户未确认「{label}」"
+            _publish(
+                {
+                    "id": step_id,
+                    "kind": "tool",
+                    "tool": tool,
+                    "status": "done",
+                    "label": label,
+                    "path": path,
+                    "detail": result,
+                }
+            )
+            return result
     result = work()
     _publish(
         {
@@ -275,6 +323,12 @@ def _commit_file_change(rel: str, old_content: str, new_content: str, *, action:
     return f"已{action} {rel}（全文 {len(new_content)} 字符，本次 {sign}{delta}）"
 
 
+def _note_path_affected(rel: str) -> None:
+    """记录本轮受影响的工作区路径（供刷新文件树）。"""
+    if rel and rel not in _written_this_turn:
+        _written_this_turn.append(rel)
+
+
 @tool
 def list_files() -> str:
     """列出工作区内所有笔记文件的相对路径（每行一个）。"""
@@ -296,7 +350,7 @@ def _list_files_impl() -> str:
 
 @tool
 def read_file(path: str) -> str:
-    """读取工作区内一篇笔记的完整内容。path 为相对路径，如 2025-05-15.md。"""
+    """读取笔记正文以便修改或汇总；不是为了移动/复制/重命名路径（那些用 move_path/copy_path，无需 read）。"""
     rel = _norm_rel(path)
     return _run_tool_step(
         "read_file",
@@ -347,7 +401,7 @@ def _edit_file_impl(rel: str, old_string: str, new_string: str) -> str:
 
 @tool
 def write_file(path: str, content: str) -> str:
-    """将完整内容写入工作区。用于新建文件，或短文全文重写；修改已有长文请优先 edit_file。"""
+    """写入完整正文：仅用于新建笔记或用户要求的全文重写。禁止用于移动/复制/归档到另一路径（用 move_path/copy_path）。"""
     rel = _norm_rel(path)
     return _run_tool_step(
         "write_file",
@@ -368,6 +422,103 @@ def _write_file_impl(rel: str, content: str) -> str:
                 "或先确认用户需要全文重写。"
             )
     return _commit_file_change(rel, old_content, content, action="写入")
+
+
+@tool
+def mkdir(path: str) -> str:
+    """在工作区内新建文件夹（可多级），如 5月 或 归档/2025。"""
+    rel = _norm_rel(path)
+    return _run_tool_step(
+        "mkdir",
+        f"新建文件夹 {rel}",
+        rel,
+        lambda: _mkdir_impl(rel),
+    )
+
+
+def _mkdir_impl(rel: str) -> str:
+    """（内部）创建目录。由 mkdir 工具调用。"""
+    try:
+        created = workspace_fs.create_directory(rel)
+    except workspace_fs.WorkspaceError as e:
+        return f"新建文件夹失败: {e}"
+    _note_path_affected(created)
+    return f"已新建文件夹 {created}"
+
+
+@tool
+def delete_path(path: str) -> str:
+    """删除工作区内的文件或文件夹（目录会递归删除）。仅在用户明确要求时使用。"""
+    rel = _norm_rel(path)
+    return _run_tool_step(
+        "delete_path",
+        f"删除 {rel}",
+        rel,
+        lambda: _delete_path_impl(rel),
+    )
+
+
+def _delete_path_impl(rel: str) -> str:
+    """（内部）删除路径。由 delete_path 工具调用。"""
+    try:
+        deleted = workspace_fs.delete_path(rel)
+    except workspace_fs.WorkspaceError as e:
+        return f"删除失败: {e}"
+    _note_path_affected(deleted)
+    return f"已删除 {deleted}"
+
+
+@tool
+def move_path(source: str, destination: str) -> str:
+    """
+    移动或重命名文件/文件夹（仅改路径，不读不写内容）。
+    用户说放进某文件夹、移过去、归档、重命名、剪切时都必须用本工具。
+    禁止用 read_file+write_file+delete_path 代替。destination 为已有文件夹则移入其下。
+    """
+    src = _norm_rel(source)
+    dest = destination.replace("\\", "/").strip()
+    return _run_tool_step(
+        "move_path",
+        f"移动 {src} → {dest}",
+        src,
+        lambda: _move_path_impl(src, dest),
+    )
+
+
+def _move_path_impl(src: str, dest: str) -> str:
+    """（内部）移动路径。由 move_path 工具调用。"""
+    try:
+        final = workspace_fs.move_path(src, dest)
+    except workspace_fs.WorkspaceError as e:
+        return f"移动失败: {e}"
+    _note_path_affected(final)
+    return f"已移动至 {final}"
+
+
+@tool
+def copy_path(source: str, destination: str) -> str:
+    """
+    复制文件或文件夹（仅磁盘复制，源保留；禁止 read_file+write_file 复制正文）。
+    复制整夹时 destination 可为新目录名（如 5月-备份）。
+    """
+    src = _norm_rel(source)
+    dest = destination.replace("\\", "/").strip()
+    return _run_tool_step(
+        "copy_path",
+        f"复制 {src} → {dest}",
+        src,
+        lambda: _copy_path_impl(src, dest),
+    )
+
+
+def _copy_path_impl(src: str, dest: str) -> str:
+    """（内部）复制路径。由 copy_path 工具调用。"""
+    try:
+        final = workspace_fs.copy_path(src, dest)
+    except workspace_fs.WorkspaceError as e:
+        return f"复制失败: {e}"
+    _note_path_affected(final)
+    return f"已复制至 {final}"
 
 
 _WEEKDAY_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -434,7 +585,17 @@ def _build_agent(model_id: str, thinking_enabled: bool):
     model = _create_chat_model(model_id, thinking_enabled=thinking_enabled)
     return create_agent(
         model=model,
-        tools=[list_files, read_file, edit_file, write_file, get_current_time],
+        tools=[
+            list_files,
+            read_file,
+            edit_file,
+            write_file,
+            mkdir,
+            move_path,
+            copy_path,
+            delete_path,
+            get_current_time,
+        ],
         system_prompt=SYSTEM_PROMPT,
     )
 
@@ -551,15 +712,62 @@ def chat_stream(
     thinking_enabled: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """
-    流式执行一轮对话（主入口）。
+    流式执行一轮对话（主入口）：在后台线程跑 Agent，主线程可穿插推送 confirm 事件。
 
     产出事件类型：
-    - step：思考、文件工具、模型调用（kind=llm）、生成标题（tool=generate_title）等。
-    - done：含 reply、written_files、changes、steps、session_id、turn；首轮含 session_title。
-    - error：异常信息。
+    - step / confirm / done / error（confirm 为危险工具等待用户确认）。
+    """
+    confirm_reg = ConfirmRegistry()
+    set_active_registry(confirm_reg)
+    event_q: queue.Queue = queue.Queue()
 
-    流程：LangChain Agent 循环 →（首轮）循环外再调一次 LLM 生成标题 → done。
-    标题生成不在 Agent 工具列表内，但在同一轮流式时间线里展示。
+    def pump() -> None:
+        """在后台线程消费 _chat_stream_events，避免工具确认阻塞时无法推送 SSE。"""
+        try:
+            for evt in _chat_stream_events(
+                user_message,
+                current_file,
+                model_id=model_id,
+                thinking_enabled=thinking_enabled,
+            ):
+                event_q.put(evt)
+        finally:
+            set_active_registry(None)
+            event_q.put(_CHAT_STREAM_DONE)
+
+    worker = threading.Thread(target=pump, daemon=True)
+    worker.start()
+    try:
+        while True:
+            for confirm_evt in confirm_reg.drain_events():
+                yield confirm_evt
+            try:
+                evt = event_q.get(timeout=0.05)
+            except queue.Empty:
+                if not worker.is_alive() and not confirm_reg.drain_events():
+                    try:
+                        evt = event_q.get_nowait()
+                    except queue.Empty:
+                        break
+                continue
+            if evt is _CHAT_STREAM_DONE:
+                break
+            yield evt
+    finally:
+        set_active_registry(None)
+
+
+def _chat_stream_events(
+    user_message: str,
+    current_file: str | None = None,
+    *,
+    model_id: str | None = None,
+    thinking_enabled: bool = False,
+) -> Iterator[dict[str, Any]]:
+    """
+    单轮对话事件生成器（供 chat_stream 后台线程调用）。
+
+    产出 step / done / error；危险工具确认由 tool_confirm 在工具线程内阻塞处理。
     """
     global _written_this_turn, _changes_this_turn, _current_turn, _collected_steps
 

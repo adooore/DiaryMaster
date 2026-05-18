@@ -152,3 +152,104 @@ def delete_path(relative_path: str) -> str:
     else:
         raise WorkspaceError(f"无法删除: {rel}")
     return rel
+
+
+def _workspace_root() -> Path:
+    """返回已 resolve 的工作区根目录。"""
+    return _ensure_workspace().resolve()
+
+
+def _path_under_workspace(target: Path) -> str:
+    """将绝对路径转为工作区相对路径（POSIX）。"""
+    root = _workspace_root()
+    resolved = target.resolve()
+    if not str(resolved).startswith(str(root)):
+        raise WorkspaceError("不允许访问工作区外的路径")
+    rel = resolved.relative_to(root).as_posix()
+    return rel
+
+
+def _is_descendant(parent: Path, child: Path) -> bool:
+    """判断 child 是否位于 parent 目录内部。"""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_transfer_destination(
+    source: Path,
+    destination: str,
+    *,
+    operation: str,
+) -> Path:
+    """
+    解析移动/复制的目标绝对路径。
+
+    - 若 destination 已存在且为目录 → 放入该目录（保留源名称）。
+    - 若 destination 已存在且为文件 → 报错。
+    - 若不存在：带扩展名视为完整文件路径；源为文件夹且目标无扩展名视为重命名/复制为该项。
+    """
+    dest_raw = destination.replace("\\", "/").strip()
+    dest_is_dir_hint = dest_raw.endswith("/")
+    dest_rel = _normalize_rel(dest_raw.strip("/"))
+
+    root = _workspace_root()
+    dest_candidate = (root / dest_rel).resolve(strict=False)
+    if not str(dest_candidate).startswith(str(root)):
+        raise WorkspaceError("不允许访问工作区外的路径")
+
+    if dest_candidate.exists():
+        if dest_candidate.is_dir():
+            target = dest_candidate / source.name
+        else:
+            raise WorkspaceError(f"目标已存在: {dest_rel}")
+    elif dest_is_dir_hint:
+        target = dest_candidate / source.name
+    elif Path(dest_rel).suffix:
+        target = dest_candidate
+    elif source.is_dir():
+        target = dest_candidate
+    else:
+        target = dest_candidate / source.name
+
+    if target.resolve() == source.resolve():
+        raise WorkspaceError("源路径与目标路径相同")
+    if source.is_dir() and _is_descendant(source, target):
+        raise WorkspaceError("不能将文件夹移动到其自身的子路径下")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise WorkspaceError(f"目标已存在: {_path_under_workspace(target)}")
+    return target
+
+
+def move_path(source: str, destination: str) -> str:
+    """移动或重命名工作区内的文件/文件夹；不读写文件内容。返回移动后的相对路径。"""
+    src_rel = _normalize_rel(source)
+    src = _resolve_safe(src_rel)
+    root = _workspace_root()
+    if src.resolve() == root:
+        raise WorkspaceError("不能移动工作区根目录")
+    if not src.exists():
+        raise WorkspaceError(f"不存在: {src_rel}")
+
+    target = _resolve_transfer_destination(src, destination, operation="move")
+    shutil.move(str(src), str(target))
+    return _path_under_workspace(target)
+
+
+def copy_path(source: str, destination: str) -> str:
+    """复制工作区内的文件或文件夹（保留源路径不变）。返回复制后的相对路径。"""
+    src_rel = _normalize_rel(source)
+    src = _resolve_safe(src_rel)
+    if not src.exists():
+        raise WorkspaceError(f"不存在: {src_rel}")
+
+    target = _resolve_transfer_destination(src, destination, operation="copy")
+    if src.is_dir():
+        shutil.copytree(src, target)
+    else:
+        shutil.copy2(src, target)
+    return _path_under_workspace(target)
