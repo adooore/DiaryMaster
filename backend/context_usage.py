@@ -114,49 +114,84 @@ def extract_usage_from_ai_message(msg: AIMessage) -> dict[str, int] | None:
 def normalize_turn_usage(
     prompt_tokens: int,
     completion_tokens: int = 0,
-    total_tokens: int = 0,
     *,
     source: str = "api",
+    context_prompt_tokens: int | None = None,
+    calls: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
-    """构造写入 chat_log 与 done 事件的 usage 字段。"""
-    return {
-        "prompt_tokens": int(prompt_tokens),
-        "completion_tokens": int(completion_tokens),
-        "total_tokens": int(total_tokens or (prompt_tokens + completion_tokens)),
+    """构造写入 chat_log 与 done 事件的 usage 字段（合计恒为输入+输出）。"""
+    prompt = int(prompt_tokens)
+    completion = int(completion_tokens)
+    context = int(
+        context_prompt_tokens if context_prompt_tokens is not None else prompt
+    )
+    out: dict[str, Any] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+        "context_prompt_tokens": context,
         "source": source,
     }
+    if calls:
+        out["calls"] = calls
+        out["model_calls"] = len(calls)
+    return out
+
+
+def context_window_tokens_from_usage(usage: dict[str, Any] | None) -> int:
+    """从 usage 取上下文窗口占用（优先 context_prompt_tokens，兼容旧数据）。"""
+    if not usage:
+        return 0
+    ctx = usage.get("context_prompt_tokens")
+    if ctx is not None and int(ctx) > 0:
+        return int(ctx)
+    return int(usage.get("prompt_tokens") or 0)
 
 
 class TurnUsageTracker:
-    """一轮 Agent 内多次 model 调用的 usage 聚合（圆环用 prompt max）。"""
+    """一轮 Agent 内多次 model 调用的 usage 聚合（输入/输出累加，上下文取 max）。"""
 
     def __init__(self) -> None:
         """初始化一轮对话的 usage 累计器。"""
         self.prompt_tokens = 0
         self.completion_tokens = 0
-        self.total_tokens = 0
+        self.context_prompt_tokens = 0
         self.source = "api"
         self._saw_api = False
+        self.calls: list[dict[str, int]] = []
 
     def absorb_message(self, msg: AIMessage) -> None:
-        """吸收一次 model 调用的 usage（prompt 取 max，completion 累加）。"""
+        """吸收一次 model 调用的 usage（输入/输出累加，上下文取单次 prompt 最大值）。"""
         u = extract_usage_from_ai_message(msg)
         if not u:
             return
         self._saw_api = True
-        self.prompt_tokens = max(self.prompt_tokens, u["prompt_tokens"])
-        self.completion_tokens += u["completion_tokens"]
-        self.total_tokens += u["total_tokens"]
+        p = u["prompt_tokens"]
+        c = u["completion_tokens"]
+        self.prompt_tokens += p
+        self.completion_tokens += c
+        self.context_prompt_tokens = max(self.context_prompt_tokens, p)
+        self.calls.append(
+            {
+                "index": len(self.calls) + 1,
+                "prompt_tokens": p,
+                "completion_tokens": c,
+                "total_tokens": p + c,
+            }
+        )
 
     def to_dict(self) -> dict[str, Any] | None:
         """若本轮见过 API usage 则返回 dict，否则 None。"""
-        if not self._saw_api or self.prompt_tokens <= 0:
+        if not self._saw_api or (
+            self.prompt_tokens <= 0 and self.completion_tokens <= 0
+        ):
             return None
         return normalize_turn_usage(
             self.prompt_tokens,
             self.completion_tokens,
-            self.total_tokens,
+            context_prompt_tokens=self.context_prompt_tokens,
             source="api",
+            calls=[dict(c) for c in self.calls],
         )
 
 
@@ -198,7 +233,7 @@ def get_session_context_usage(
     """
     计算当前 Session 上下文占用（供圆环 API）。
 
-    优先最后一条 assistant 的 API prompt_tokens；无对话为 0；否则字符估算。
+    优先最后一条 assistant 的 context_prompt_tokens；无对话为 0；否则字符估算。
     """
     mid = model_id or default_model_id()
     spec = get_model(mid)
@@ -210,10 +245,10 @@ def get_session_context_usage(
 
     is_estimate = False
     if usage and usage.get("source") == "api":
-        used = int(usage["prompt_tokens"])
+        used = context_window_tokens_from_usage(usage)
         source = "api"
-    elif usage and usage.get("prompt_tokens"):
-        used = int(usage["prompt_tokens"])
+    elif usage and context_window_tokens_from_usage(usage):
+        used = context_window_tokens_from_usage(usage)
         source = usage.get("source", "api")
     elif not has_agent_conversation(messages, chat_log):
         used = 0

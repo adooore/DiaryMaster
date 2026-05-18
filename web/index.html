@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=30" />
+  <link rel="stylesheet" href="/static/style.css?v=34" />
 </head>
 <body>
   <header class="topbar">
@@ -66,7 +66,7 @@
       </div>
       <div class="editor-wrap">
         <textarea id="editor" class="editor" placeholder="在左侧选择文件…" spellcheck="false"></textarea>
-        <div id="editor-preview" class="editor-preview markdown-body hidden" aria-label="Markdown 预览"></div>
+        <div id="editor-preview" class="editor-preview markdown-body editor-preview--editable hidden" aria-label="Markdown 预览与编辑" spellcheck="true"></div>
         <pre id="diff-view" class="diff-view hidden" aria-label="文件变更对比"></pre>
       </div>
     </section>
@@ -197,6 +197,7 @@
   <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
-  <script src="/static/app.js?v=30"></script>
+  <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
+  <script src="/static/app.js?v=34"></script>
 </body>
 </html>

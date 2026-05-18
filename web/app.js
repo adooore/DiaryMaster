@@ -99,15 +99,106 @@ let sessionsList = [];
 let openTabIds = [];
 let historyPanelOpen = false;
 
+/** @type {ReturnType<typeof setTimeout> | null} */
+let previewSyncTimer = null;
+
+/** 懒加载 HTML→Markdown 转换器。 */
+function getTurndownService() {
+  if (typeof TurndownService === "undefined") return null;
+  if (!getTurndownService._instance) {
+    getTurndownService._instance = new TurndownService({
+      headingStyle: "atx",
+      codeBlockStyle: "fenced",
+      emDelimiter: "*",
+    });
+  }
+  return getTurndownService._instance;
+}
+
+/** 预览区是否仅为空占位。 */
+function isEditorPreviewPlaceholder() {
+  return Boolean(editorPreviewEl?.querySelector(".editor-preview-empty"));
+}
+
+/** 判断可编辑预览 HTML 是否实质为空。 */
+function isBlankPreviewHtml(html) {
+  const trimmed = (html || "").trim();
+  return (
+    !trimmed ||
+    trimmed === "<br>" ||
+    trimmed === "<p><br></p>" ||
+    trimmed === "<p></p>"
+  );
+}
+
+/** 将可编辑预览区的 HTML 写回 textarea（不重新渲染预览）。 */
+function syncPreviewHtmlToEditor() {
+  if (!editorPreviewEl) return;
+  if (isEditorPreviewPlaceholder()) {
+    editorEl.value = "";
+    return;
+  }
+  const html = editorPreviewEl.innerHTML;
+  if (isBlankPreviewHtml(html)) {
+    editorEl.value = "";
+    return;
+  }
+  const turndown = getTurndownService();
+  editorEl.value = turndown
+    ? turndown.turndown(html)
+    : editorPreviewEl.innerText || "";
+}
+
+/** 防抖：预览输入时同步到隐藏 textarea。 */
+function schedulePreviewSync() {
+  if (viewMode !== "preview") return;
+  if (previewSyncTimer) clearTimeout(previewSyncTimer);
+  previewSyncTimer = setTimeout(() => {
+    previewSyncTimer = null;
+    syncPreviewHtmlToEditor();
+  }, 200);
+}
+
+/** 聚焦空预览时替换为可编辑段落。 */
+function onEditorPreviewFocusIn() {
+  if (viewMode !== "preview" || !editorPreviewEl) return;
+  if (!isEditorPreviewPlaceholder()) return;
+  editorPreviewEl.innerHTML = "<p></p>";
+  editorPreviewEl.contentEditable = "true";
+}
+
+/** 根据 textarea 渲染预览 HTML。 */
 function refreshEditorPreview() {
   if (!editorPreviewEl) return;
   const text = editorEl.value;
   if (!text.trim()) {
     editorPreviewEl.innerHTML =
-      '<p class="editor-preview-empty">暂无内容。</p>';
+      '<p class="editor-preview-empty">暂无内容。点击此处开始输入。</p>';
     return;
   }
   editorPreviewEl.innerHTML = renderMarkdownToHtml(text);
+}
+
+/** 进入可编辑预览：渲染并开启 contenteditable。 */
+function mountEditablePreview() {
+  if (!editorPreviewEl) return;
+  refreshEditorPreview();
+  editorPreviewEl.contentEditable = "true";
+  editorPreviewEl.setAttribute("role", "textbox");
+  editorPreviewEl.setAttribute("aria-multiline", "true");
+}
+
+/** 离开预览前写回 textarea 并关闭编辑。 */
+function unmountEditablePreview() {
+  if (previewSyncTimer) {
+    clearTimeout(previewSyncTimer);
+    previewSyncTimer = null;
+  }
+  syncPreviewHtmlToEditor();
+  if (!editorPreviewEl) return;
+  editorPreviewEl.contentEditable = "false";
+  editorPreviewEl.removeAttribute("role");
+  editorPreviewEl.removeAttribute("aria-multiline");
 }
 
 /** 同步「编辑 / 预览 / 变更」三档互斥高亮（与 viewMode 一致）。 */
@@ -161,6 +252,10 @@ function resolveViewModeForOpen({ keepDiff = false } = {}) {
 
 /** 切换编辑 / 预览 / Diff 视图。 */
 function setViewMode(mode) {
+  if (viewMode === "preview" && mode !== "preview") {
+    unmountEditablePreview();
+  }
+
   viewMode = mode;
   const isEdit = mode === "edit";
   const isPreview = mode === "preview";
@@ -170,10 +265,10 @@ function setViewMode(mode) {
   if (editorPreviewEl) editorPreviewEl.classList.toggle("hidden", !isPreview);
   diffViewEl.classList.toggle("hidden", !isDiff);
 
-  const readOnly = isPreview || isDiff;
+  const readOnly = isDiff;
   btnSave.disabled = !currentFile || readOnly;
 
-  if (isPreview) refreshEditorPreview();
+  if (isPreview) mountEditablePreview();
   syncEditorViewSwitchUI();
 }
 
@@ -615,13 +710,14 @@ function upsertAgentStep(pendingId, step) {
 }
 
 /** 完成 assistant 占位消息并写入最终回复。 */
-function finalizePendingAssistant(pendingId, { text, steps, reasoning }) {
+function finalizePendingAssistant(pendingId, { text, steps, reasoning, usage }) {
   const msg = findPendingAssistant(pendingId);
   if (!msg) return;
   delete msg._pending;
   if (text != null) msg.text = text;
   if (steps) msg.steps = steps;
   if (reasoning) msg.reasoning = reasoning;
+  if (usage) msg.usage = usage;
   if (isStepsFlowComplete(msg.steps || [])) {
     msg.stepsCollapsed = true;
   }
@@ -673,6 +769,10 @@ function appendMessageElement(parent, item) {
       div.textContent = item.text;
     }
   }
+
+  const usageFooter = buildMessageUsageFooter(item);
+  if (usageFooter) div.appendChild(usageFooter);
+
   parent.appendChild(div);
 }
 
@@ -846,6 +946,165 @@ function formatTokenCount(n) {
   return String(n);
 }
 
+/** 精确展示 token 数（用于单轮用量脚注）。 */
+function formatTokenCountExact(n) {
+  return (Number(n) || 0).toLocaleString("zh-CN");
+}
+
+/** 从 usage 取上下文窗口 token（与圆环一致）。 */
+function contextTokensFromUsage(usage) {
+  if (!usage) return 0;
+  const ctx = Number(usage.context_prompt_tokens);
+  if (ctx > 0) return ctx;
+  return Number(usage.prompt_tokens) || 0;
+}
+
+/** 解析 usage 中的分次模型调用列表。 */
+function getUsageCallRows(usage) {
+  if (!usage || typeof usage !== "object") return [];
+  if (Array.isArray(usage.calls) && usage.calls.length) {
+    return usage.calls.map((c, i) => ({
+      index: Number(c.index) || i + 1,
+      prompt: Number(c.prompt_tokens) || 0,
+      completion: Number(c.completion_tokens) || 0,
+      total:
+        Number(c.total_tokens) ||
+        (Number(c.prompt_tokens) || 0) + (Number(c.completion_tokens) || 0),
+    }));
+  }
+  return [];
+}
+
+/** 汇总一轮 usage 的展示用数字。 */
+function summarizeTurnUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const prompt = Number(usage.prompt_tokens) || 0;
+  const completion = Number(usage.completion_tokens) || 0;
+  const storedTotal = Number(usage.total_tokens) || 0;
+  const partsSum = prompt + completion;
+  const contextPeak = contextTokensFromUsage(usage);
+  const calls = getUsageCallRows(usage);
+  const modelCalls = calls.length || Number(usage.model_calls) || 0;
+
+  if (partsSum <= 0 && storedTotal <= 0 && prompt <= 0) return null;
+
+  const legacyMismatch =
+    storedTotal > partsSum + 10 &&
+    !usage.context_prompt_tokens &&
+    !calls.length;
+
+  let total = partsSum || storedTotal;
+  if (legacyMismatch) total = storedTotal;
+
+  return {
+    prompt,
+    completion,
+    total,
+    contextPeak,
+    modelCalls,
+    calls,
+    legacyMismatch,
+    source: usage.source || "api",
+  };
+}
+
+/** 格式化单次模型调用的 token 行。 */
+function formatUsageCallLine(call, { isPeak = false } = {}) {
+  const peakNote = isPeak ? " · 上下文最高" : "";
+  return `#${call.index}  输入 ${formatTokenCountExact(call.prompt)} + 输出 ${formatTokenCountExact(call.completion)} = ${formatTokenCountExact(call.total)}${peakNote}`;
+}
+
+/** 构造 assistant 消息底部的 token 用量条（含分次明细）。 */
+function buildMessageUsageFooter(item) {
+  if (item.role !== "assistant" || item._pending) return null;
+  const summary = summarizeTurnUsage(item.usage);
+  if (!summary) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "msg-usage";
+  wrap.setAttribute("role", "note");
+
+  const sourceLabel =
+    summary.source === "estimate" ? "字符估算" : "API 计量";
+
+  const summaryEl = document.createElement("div");
+  summaryEl.className = "msg-usage-summary";
+
+  const parts = [
+    `<span class="msg-usage-label">本轮 token</span>`,
+    `<span class="msg-usage-total">合计 ${formatTokenCountExact(summary.total)}</span>`,
+  ];
+
+  if (summary.prompt > 0 || summary.completion > 0) {
+    parts.push(
+      `<span class="msg-usage-parts">（输入 ${formatTokenCountExact(summary.prompt)} + 输出 ${formatTokenCountExact(summary.completion)}）</span>`
+    );
+  }
+
+  if (summary.modelCalls > 0) {
+    parts.push(
+      `<span class="msg-usage-calls-count">· ${summary.modelCalls} 次模型调用</span>`
+    );
+  } else if (summary.legacyMismatch) {
+    parts.push(`<span class="msg-usage-calls-count">· 多次模型调用</span>`);
+  }
+
+  if (
+    summary.contextPeak > 0 &&
+    summary.source === "api" &&
+    !summary.legacyMismatch
+  ) {
+    parts.push(
+      `<span class="msg-usage-context">· 上下文峰值 ${formatTokenCountExact(summary.contextPeak)}</span>`
+    );
+  }
+
+  parts.push(`<span class="msg-usage-source">· ${sourceLabel}</span>`);
+  summaryEl.innerHTML = parts.join("");
+
+  wrap.appendChild(summaryEl);
+
+  if (summary.calls.length > 0) {
+    const peakPrompt = Math.max(...summary.calls.map((c) => c.prompt));
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "msg-usage-toggle";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.textContent = `分次明细（${summary.calls.length}）`;
+
+    const list = document.createElement("ol");
+    list.className = "msg-usage-calls hidden";
+
+    for (const call of summary.calls) {
+      const li = document.createElement("li");
+      li.className = "msg-usage-call";
+      li.textContent = formatUsageCallLine(call, {
+        isPeak: call.prompt === peakPrompt && peakPrompt > 0,
+      });
+      list.appendChild(li);
+    }
+
+    toggle.addEventListener("click", () => {
+      const open = list.classList.toggle("hidden");
+      toggle.setAttribute("aria-expanded", open ? "false" : "true");
+      toggle.textContent = open
+        ? `分次明细（${summary.calls.length}）`
+        : `收起明细（${summary.calls.length}）`;
+    });
+
+    wrap.appendChild(toggle);
+    wrap.appendChild(list);
+  } else if (summary.legacyMismatch) {
+    const hint = document.createElement("p");
+    hint.className = "msg-usage-hint";
+    hint.textContent =
+      "该条为旧版统计，无分次记录；新发一轮对话后可查看每次调用的输入/输出。";
+    wrap.appendChild(hint);
+  }
+
+  return wrap;
+}
+
 /** 更新底栏上下文占用圆环。 */
 function updateContextRing(ctx) {
   if (!sessionContextRingEl) return;
@@ -975,14 +1234,14 @@ async function refreshContextUsage() {
 
 /** 用 chat done 事件中的 usage 更新圆环。 */
 function applyContextUsageFromDone(usage) {
-  if (!usage?.prompt_tokens) {
+  const used = contextTokensFromUsage(usage);
+  if (!used) {
     refreshContextUsage();
     return;
   }
   const modelId = getSelectedModelId();
   const spec = modelsCatalog.find((m) => m.id === modelId);
-  const limit = spec?.context_limit || usage.prompt_tokens * 2;
-  const used = usage.prompt_tokens;
+  const limit = spec?.context_limit || used * 2;
   const pct = Math.min(100, Math.round((used / limit) * 1000) / 10);
   updateContextRing({
     used_tokens: used,
@@ -2021,6 +2280,7 @@ async function applyLatestChangeForFile(path, changes) {
 /** 保存当前编辑器内容到工作区。 */
 async function saveFile() {
   if (!currentFile) return;
+  if (viewMode === "preview") syncPreviewHtmlToEditor();
   const before = editorEl.value;
   btnSave.disabled = true;
   const res = await fetch(`/api/files/${encodeURIComponent(currentFile)}`, {
@@ -2085,6 +2345,7 @@ async function consumeChatStream(response, pendingId, pendingTurn) {
           text: event.reply,
           steps: event.steps,
           reasoning: event.reasoning,
+          usage: event.usage,
         });
         if (event.usage) applyContextUsageFromDone(event.usage);
         if (event.session_title && event.sessions) {
@@ -2189,6 +2450,8 @@ function initEditorViewMode() {
   btnViewEdit?.addEventListener("click", () => setEditorDisplayMode("edit"));
   btnViewPreview?.addEventListener("click", () => setEditorDisplayMode("preview"));
   btnViewDiff?.addEventListener("click", () => setEditorDisplayMode("diff"));
+  editorPreviewEl?.addEventListener("input", schedulePreviewSync);
+  editorPreviewEl?.addEventListener("focusin", onEditorPreviewFocusIn);
   syncEditorViewSwitchUI();
 }
 

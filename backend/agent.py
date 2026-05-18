@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import datetime
 from typing import Any
 
 from langchain.agents import create_agent
@@ -69,7 +70,10 @@ SYSTEM_PROMPT = f"""你是 DiaryMaster 的笔记助手，像朋友一样帮助�
 跨文件写作：
 - 工作区可能有多篇笔记。用户消息里会附带「工作区文件列表」；需要某篇全文时用 read_file 读取。
 - 汇总、周总结、对比多篇笔记：先 list_files / read_file 读取源笔记，再 write_file 写入新的汇总文件（新文件用 write_file 合理）。
-- 未 read_file 读过的内容不要编造。"""
+- 未 read_file 读过的内容不要编造。
+
+时间：
+- 涉及「今天」「昨天」「本周」「现在几点」等时间判断时，先调用 get_current_time 获取本机时间，不要猜测日期。"""
 
 def _norm_rel(path: str) -> str:
     """把路径规范成工作区相对路径（正斜杠、去掉首部 /）。"""
@@ -366,6 +370,39 @@ def _write_file_impl(rel: str, content: str) -> str:
     return _commit_file_change(rel, old_content, content, action="写入")
 
 
+_WEEKDAY_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+@tool
+def get_current_time() -> str:
+    """查询运行 DiaryMaster 的本机当前日期、时间与时区（本地系统时钟）。"""
+    return _run_tool_step(
+        "get_current_time",
+        "查询本机时间",
+        None,
+        _get_current_time_impl,
+    )
+
+
+def _get_current_time_impl() -> str:
+    """（内部）读取本机本地时区下的当前时间。由 get_current_time 工具调用。"""
+    now = datetime.now().astimezone()
+    weekday = _WEEKDAY_ZH[now.weekday()]
+    tz_name = now.tzname() or "本地时区"
+    offset = now.strftime("%z")
+    if offset:
+        offset_fmt = f"UTC{offset[:3]}:{offset[3:]}" if len(offset) >= 5 else offset
+    else:
+        offset_fmt = ""
+    tz_line = f"{tz_name} ({offset_fmt})" if offset_fmt else tz_name
+    return (
+        f"本机当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')}（{weekday}）\n"
+        f"时区: {tz_line}\n"
+        f"ISO 8601: {now.isoformat(timespec='seconds')}\n"
+        f"Unix 时间戳: {int(now.timestamp())}"
+    )
+
+
 def _create_chat_model(
     model_id: str,
     *,
@@ -397,7 +434,7 @@ def _build_agent(model_id: str, thinking_enabled: bool):
     model = _create_chat_model(model_id, thinking_enabled=thinking_enabled)
     return create_agent(
         model=model,
-        tools=[list_files, read_file, edit_file, write_file],
+        tools=[list_files, read_file, edit_file, write_file, get_current_time],
         system_prompt=SYSTEM_PROMPT,
     )
 
@@ -653,7 +690,9 @@ def chat_stream(
             )
 
             est = estimate_session_context_tokens(out_messages)
-            turn_usage = normalize_turn_usage(est, source="estimate")
+            turn_usage = normalize_turn_usage(
+                est, source="estimate", context_prompt_tokens=est
+            )
 
         done_payload: dict[str, Any] = {
             "type": "done",
