@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=36" />
+  <link rel="stylesheet" href="/static/style.css?v=37" />
 </head>
 <body>
   <header class="topbar">
@@ -188,16 +188,29 @@
       <button type="button" class="context-menu-item" data-action="new-file" role="menuitem">新建文件…</button>
       <button type="button" class="context-menu-item" data-action="new-folder" role="menuitem">新建文件夹…</button>
     </div>
+    <div class="context-menu-section" data-menu-section="clipboard">
+      <div class="context-menu-sep" role="separator" aria-hidden="true"></div>
+      <button type="button" class="context-menu-item" data-action="paste-file" role="menuitem" disabled>粘贴</button>
+    </div>
     <div class="context-menu-section" data-menu-section="target" hidden>
+      <div class="context-menu-sep" role="separator" aria-hidden="true"></div>
+      <button type="button" class="context-menu-item" data-action="copy-file" role="menuitem">复制</button>
+      <button type="button" class="context-menu-item" data-action="cut-file" role="menuitem">剪切</button>
+      <button type="button" class="context-menu-item" data-action="rename" role="menuitem">重命名…</button>
       <div class="context-menu-sep" role="separator" aria-hidden="true"></div>
       <button type="button" class="context-menu-item context-menu-item--danger" data-action="delete" role="menuitem">删除…</button>
     </div>
+  </div>
+  <div id="text-context-menu" class="context-menu hidden" role="menu" aria-label="文本操作">
+    <button type="button" class="context-menu-item" data-action="text-copy" role="menuitem">复制</button>
+    <button type="button" class="context-menu-item" data-action="text-cut" role="menuitem">剪切</button>
+    <button type="button" class="context-menu-item" data-action="text-paste" role="menuitem">粘贴</button>
   </div>
   <div id="app-tooltip" class="app-tooltip hidden" role="tooltip" aria-hidden="true"></div>
   <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
-  <script src="/static/app.js?v=36"></script>
+  <script src="/static/app.js?v=40"></script>
 </body>
 </html>
