@@ -22,6 +22,16 @@ from langchain_core.tools import tool
 
 from backend import workspace_fs
 from backend.context_usage import TurnUsageTracker
+from backend.memory import (
+    MEMORY_TOOL_POLICY,
+    SEARCH_TOOL_POLICY,
+    ensure_memory_snapshot,
+    refresh_memory_snapshot,
+    drop_memory_snapshot,
+    effective_system_prompt,
+    run_memory_action,
+)
+from backend.memory import search as memory_search
 from backend.model_registry import (
     default_model_id,
     deepseek_api_model_name,
@@ -89,7 +99,15 @@ SYSTEM_PROMPT = f"""你是 DiaryMaster 的笔记助手，像朋友一样帮助�
 - 移动/复制**不需要**先 read_file；move_path / copy_path 不读不写文件内容，路径正确即可直接调用。
 
 时间：
-- 涉及「今天」「昨天」「本周」「现在几点」等时间判断时，先调用 get_current_time 获取本机时间，不要猜测日期。"""
+- 涉及「今天」「昨天」「本周」「现在几点」等时间判断时，先调用 get_current_time 获取本机时间，不要猜测日期。
+{MEMORY_TOOL_POLICY}
+{SEARCH_TOOL_POLICY}"""
+
+
+def get_effective_system_prompt(session_id: str | None = None) -> str:
+    """基础规则 + 该 Session 冻结记忆块（供 context_usage 等模块调用）。"""
+    return effective_system_prompt(SYSTEM_PROMPT, session_id)
+
 
 def _norm_rel(path: str) -> str:
     """把路径规范成工作区相对路径（正斜杠、去掉首部 /）。"""
@@ -554,6 +572,45 @@ def _get_current_time_impl() -> str:
     )
 
 
+@tool
+def memory(
+    action: str,
+    store: str,
+    text: str = "",
+    old_text: str = "",
+    new_text: str = "",
+) -> str:
+    """
+    跨会话长期记忆：action 为 add|replace|remove；store 为 user|memory。
+    add 用 text；replace 用 old_text+new_text；remove 用 old_text（须与磁盘正文唯一匹配）。
+    不存笔记全文与任务进度；占用过高时先 consolidate 再 add。
+    """
+    store_key = (store or "").strip().lower()
+    label = f"记忆 {action} · {store_key or store}"
+    return _run_tool_step(
+        "memory",
+        label,
+        None,
+        lambda: run_memory_action(action, store, text, old_text, new_text),
+    )
+
+
+@tool
+def search_past_chats(query: str, limit: int = 5) -> str:
+    """
+    跨 Session 搜索历史对话：query 为关键词或短语，limit 默认 5（最多 20）。
+    返回 session_id、标题、时间、摘要片段；当前会话会标注；只读，不自动切换 Session。
+    """
+    q = (query or "").strip()
+    label = f"检索历史对话 · {q[:40]}{'…' if len(q) > 40 else ''}" if q else "检索历史对话"
+    return _run_tool_step(
+        "search_past_chats",
+        label,
+        None,
+        lambda: memory_search.run_search(query, limit, store.active_id),
+    )
+
+
 def _create_chat_model(
     model_id: str,
     *,
@@ -580,8 +637,8 @@ def _create_chat_model(
     return init_chat_model(**kwargs)
 
 
-def _build_agent(model_id: str, thinking_enabled: bool):
-    """创建 LangChain Agent（按 model_id + 思考开关）。"""
+def _build_agent(model_id: str, thinking_enabled: bool, system_prompt: str):
+    """创建 LangChain Agent（按 model_id + 思考开关 + 本会话 effective system prompt）。"""
     model = _create_chat_model(model_id, thinking_enabled=thinking_enabled)
     return create_agent(
         model=model,
@@ -595,12 +652,14 @@ def _build_agent(model_id: str, thinking_enabled: bool):
             copy_path,
             delete_path,
             get_current_time,
+            memory,
+            search_past_chats,
         ],
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
 
 
-_agent_cache: dict[tuple[str, bool], Any] = {}
+_agent_cache: dict[tuple[str, bool, str], Any] = {}
 
 
 def clear_agent_cache() -> None:
@@ -608,12 +667,13 @@ def clear_agent_cache() -> None:
     _agent_cache.clear()
 
 
-def _get_agent(model_id: str, thinking_enabled: bool):
-    """按 (model_id, thinking) 缓存 Agent 实例。"""
+def _get_agent(model_id: str, thinking_enabled: bool, session_id: str):
+    """按 (model_id, thinking, session_id) 缓存 Agent；system prompt 含该 Session 冻结记忆。"""
     mid = validate_model_id(model_id)
-    key = (mid, bool(thinking_enabled))
+    effective = effective_system_prompt(SYSTEM_PROMPT, session_id)
+    key = (mid, bool(thinking_enabled), effective)
     if key not in _agent_cache:
-        _agent_cache[key] = _build_agent(mid, key[1])
+        _agent_cache[key] = _build_agent(mid, key[1], effective)
     return _agent_cache[key]
 
 
@@ -795,6 +855,7 @@ def _chat_stream_events(
     set_step_emitter(emit)
 
     session = store.get_session()
+    ensure_memory_snapshot(session.id)
     messages = list(session.messages)
     if thinking:
         normalize_reasoning_on_messages(messages)
@@ -804,7 +865,7 @@ def _chat_stream_events(
     final_state: dict[str, Any] | None = None
 
     try:
-        agent = _get_agent(mid, thinking)
+        agent = _get_agent(mid, thinking, session.id)
         for item in agent.stream(
             {"messages": messages},
             stream_mode=["updates", "values"],
@@ -956,19 +1017,22 @@ def chat(
 
 
 def new_session() -> str:
-    """新建空白 Session，返回 session id。"""
+    """新建空白 Session，返回 session id（并冻结当前磁盘记忆快照）。"""
     session = store.new_session()
+    refresh_memory_snapshot(session.id)
     return session.id
 
 
 def switch_session(session_id: str) -> str:
-    """切换到已有 Session。"""
+    """切换到已有 Session（首次激活该 id 时冻结记忆快照）。"""
     session = store.switch_session(session_id)
+    ensure_memory_snapshot(session.id)
     return session.id
 
 
 def delete_session(session_id: str) -> str:
     """删除 Session，返回新的 active session id。"""
+    drop_memory_snapshot(session_id)
     return store.delete_session(session_id)
 
 

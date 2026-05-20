@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=37" />
+  <link rel="stylesheet" href="/static/style.css?v=38" />
 </head>
 <body>
   <header class="topbar">
@@ -176,8 +176,33 @@
         <p class="settings-hint settings-hint-muted">
           在 <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer">DeepSeek 开放平台</a> 创建密钥后粘贴保存。仅保存在本机，不会上传到 Git。
         </p>
-        <div class="settings-actions">
+        <div class="settings-actions settings-actions--inline">
           <button type="button" id="btn-settings-clear-key" class="btn secondary">清除密钥</button>
+        </div>
+        <hr class="settings-divider" />
+        <h3 class="settings-section-title">长期记忆</h3>
+        <p class="settings-hint settings-hint-muted settings-hint--top">
+          跨会话偏好与习惯，存于本机 <code>data/memories/</code>。条目用 <code>§</code> 分隔；保存后<strong>新开的对话</strong>才会载入（当前对话仍用启动时的快照）。
+        </p>
+        <label class="settings-label" for="settings-memory-user">USER.md</label>
+        <textarea
+          id="settings-memory-user"
+          class="settings-textarea"
+          rows="5"
+          spellcheck="false"
+          placeholder="用户偏好、纠正、长期习惯…"
+        ></textarea>
+        <p id="settings-memory-user-usage" class="settings-hint settings-usage-hint"></p>
+        <label class="settings-label" for="settings-memory-memory">MEMORY.md</label>
+        <textarea
+          id="settings-memory-memory"
+          class="settings-textarea"
+          rows="6"
+          spellcheck="false"
+          placeholder="工作区整理约定等（非笔记正文）…"
+        ></textarea>
+        <p id="settings-memory-memory-usage" class="settings-hint settings-usage-hint"></p>
+        <div class="settings-actions">
           <button type="submit" class="btn">保存</button>
         </div>
       </form>
@@ -211,6 +236,6 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
-  <script src="/static/app.js?v=40"></script>
+  <script src="/static/app.js?v=41"></script>
 </body>
 </html>

@@ -54,16 +54,22 @@ def estimate_message_tokens(msg: Any) -> int:
     return estimate_tokens(combined) + 4
 
 
-def _system_prompt_tokens() -> int:
-    """系统提示词占用的估算 token。"""
-    from backend.agent import SYSTEM_PROMPT
+def _system_prompt_tokens(effective_system_prompt: str | None = None) -> int:
+    """系统提示词占用的估算 token（默认含当前 Session 冻结记忆块）。"""
+    if effective_system_prompt is not None:
+        return estimate_tokens(effective_system_prompt)
+    from backend.agent import get_effective_system_prompt
 
-    return estimate_tokens(SYSTEM_PROMPT)
+    return estimate_tokens(get_effective_system_prompt())
 
 
-def estimate_session_context_tokens(messages: list[Any]) -> int:
+def estimate_session_context_tokens(
+    messages: list[Any],
+    *,
+    effective_system_prompt: str | None = None,
+) -> int:
     """根据 messages 列表估算送入模型的总 prompt token（含系统提示与工具开销）。"""
-    total = _system_prompt_tokens() + TOOLS_AND_FRAME_OVERHEAD
+    total = _system_prompt_tokens(effective_system_prompt) + TOOLS_AND_FRAME_OVERHEAD
     for msg in messages or []:
         total += estimate_message_tokens(msg)
     return total
@@ -229,6 +235,7 @@ def get_session_context_usage(
     model_id: str | None,
     *,
     chat_log: list[dict[str, Any]] | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """
     计算当前 Session 上下文占用（供圆环 API）。
@@ -254,7 +261,12 @@ def get_session_context_usage(
         used = 0
         source = "none"
     else:
-        used = estimate_session_context_tokens(messages)
+        from backend.agent import get_effective_system_prompt
+
+        effective = get_effective_system_prompt(session_id)
+        used = estimate_session_context_tokens(
+            messages, effective_system_prompt=effective
+        )
         is_estimate = True
         source = "estimate"
 

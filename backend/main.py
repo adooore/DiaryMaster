@@ -22,6 +22,12 @@ from pydantic import BaseModel
 from backend import agent, workspace_fs
 from backend.config import WEB_DIR, api_key_status, bootstrap_api_key_from_disk, set_api_key
 from backend.context_usage import get_session_context_usage
+from backend.memory import (
+    MemoryLimitExceeded,
+    MemoryStoreError,
+    memories_payload,
+    store as memory_store,
+)
 from backend.model_registry import default_model_id, list_models, validate_model_id
 from backend.session_store import store
 from backend.tool_confirm import resolve_confirmation
@@ -100,6 +106,13 @@ class SettingsUpdateRequest(BaseModel):
     api_key: str = ""
 
 
+class MemoriesUpdateRequest(BaseModel):
+    """PUT /api/memories：手工保存 USER / MEMORY 全文。"""
+
+    user: str = ""
+    memory: str = ""
+
+
 @app.on_event("startup")
 def _on_startup() -> None:
     """应用启动：从 user_settings 注入 API Key 到环境变量。"""
@@ -122,6 +135,25 @@ def api_update_settings(body: SettingsUpdateRequest):
     return {"ok": True, **api_key_status()}
 
 
+@app.get("/api/memories")
+def api_get_memories():
+    """读取长期记忆双文件原文与字符占用。"""
+    return memories_payload()
+
+
+@app.put("/api/memories")
+def api_update_memories(body: MemoriesUpdateRequest):
+    """手工保存 USER / MEMORY 全文（校验字符上限）。"""
+    try:
+        memory_store.write_content("user", body.user)
+        memory_store.write_content("memory", body.memory)
+    except MemoryLimitExceeded as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except MemoryStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, **memories_payload()}
+
+
 @app.get("/api/models")
 def api_list_models():
     """列出可选模型（V4 Flash / Pro 等）。"""
@@ -137,6 +169,7 @@ def api_session_context_usage(model_id: str | None = None):
         session.messages,
         mid,
         chat_log=session.chat_log,
+        session_id=session.id,
     )
 
 

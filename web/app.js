@@ -31,6 +31,10 @@ const settingsForm = document.getElementById("settings-form");
 const settingsApiKeyInput = document.getElementById("settings-api-key");
 const settingsApiKeyHint = document.getElementById("settings-api-key-hint");
 const btnSettingsClearKey = document.getElementById("btn-settings-clear-key");
+const settingsMemoryUserInput = document.getElementById("settings-memory-user");
+const settingsMemoryMemoryInput = document.getElementById("settings-memory-memory");
+const settingsMemoryUserUsage = document.getElementById("settings-memory-user-usage");
+const settingsMemoryMemoryUsage = document.getElementById("settings-memory-memory-usage");
 let appTooltipAnchor = null;
 const sessionHistoryListEl = document.getElementById("session-history-list");
 const panelHistoryEl = document.getElementById("panel-history");
@@ -2859,6 +2863,72 @@ function setSettingsOpen(open) {
   }
 }
 
+/** 更新记忆占用提示（本地字数或 API 返回的 usage）。 */
+function updateMemoryUsageHint(el, used, limit, percent) {
+  if (!el) return;
+  const warn = percent >= 80;
+  el.textContent = `${used} / ${limit} 字符（${percent}%）`;
+  el.className = warn ? "settings-hint settings-usage-hint warn" : "settings-hint settings-usage-hint";
+}
+
+/** 绑定记忆文本框输入时的占用提示。 */
+function bindMemoryUsageLive() {
+  const pairs = [
+    [settingsMemoryUserInput, settingsMemoryUserUsage, 1375],
+    [settingsMemoryMemoryInput, settingsMemoryMemoryUsage, 2200],
+  ];
+  for (const [input, hint, limit] of pairs) {
+    if (!input || !hint) continue;
+    input.addEventListener("input", () => {
+      const used = input.value.length;
+      const percent = limit > 0 ? Math.round((used / limit) * 100) : 0;
+      updateMemoryUsageHint(hint, used, limit, percent);
+    });
+  }
+}
+
+/** 加载长期记忆到设置表单。 */
+async function loadMemoriesIntoForm() {
+  if (!settingsMemoryUserInput || !settingsMemoryMemoryInput) return;
+  try {
+    const res = await fetch("/api/memories");
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    settingsMemoryUserInput.value = data.user?.content ?? "";
+    settingsMemoryMemoryInput.value = data.memory?.content ?? "";
+    const u = data.user?.usage;
+    const m = data.memory?.usage;
+    if (u) updateMemoryUsageHint(settingsMemoryUserUsage, u.used, u.limit, u.percent);
+    if (m) updateMemoryUsageHint(settingsMemoryMemoryUsage, m.used, m.limit, m.percent);
+  } catch {
+    if (settingsMemoryUserUsage) {
+      settingsMemoryUserUsage.textContent = "无法读取记忆文件";
+      settingsMemoryUserUsage.className = "settings-hint settings-usage-hint warn";
+    }
+  }
+}
+
+/** 保存 USER / MEMORY 全文到后端。 */
+async function saveMemoriesFromForm() {
+  if (!settingsMemoryUserInput || !settingsMemoryMemoryInput) return;
+  const res = await fetch("/api/memories", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user: settingsMemoryUserInput.value,
+      memory: settingsMemoryMemoryInput.value,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail || res.statusText || "保存记忆失败");
+  }
+  const u = data.user?.usage;
+  const m = data.memory?.usage;
+  if (u) updateMemoryUsageHint(settingsMemoryUserUsage, u.used, u.limit, u.percent);
+  if (m) updateMemoryUsageHint(settingsMemoryMemoryUsage, m.used, m.limit, m.percent);
+}
+
 /** 加载 API Key 配置状态到设置表单。 */
 async function loadSettingsIntoForm() {
   if (!settingsApiKeyInput || !settingsApiKeyHint) return;
@@ -2880,6 +2950,7 @@ async function loadSettingsIntoForm() {
     settingsApiKeyHint.textContent = "无法读取设置状态";
     settingsApiKeyHint.className = "settings-hint warn";
   }
+  await loadMemoriesIntoForm();
 }
 
 /** 保存或清除 API Key 到后端。 */
@@ -2923,22 +2994,17 @@ function initSettings() {
     }
   });
 
+  bindMemoryUsageLive();
+
   settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const value = settingsApiKeyInput?.value?.trim() || "";
-    const hasExisting =
-      settingsApiKeyHint?.classList.contains("ok");
-    if (!value && !hasExisting) {
-      alert("请粘贴 DeepSeek API Key");
-      return;
-    }
-    if (!value) {
-      setSettingsOpen(false);
-      return;
-    }
     try {
-      await saveSettingsApiKey(value);
-      settingsApiKeyInput.value = "";
+      if (value) {
+        await saveSettingsApiKey(value);
+        settingsApiKeyInput.value = "";
+      }
+      await saveMemoriesFromForm();
       await loadSettingsIntoForm();
       setSettingsOpen(false);
     } catch (err) {
