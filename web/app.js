@@ -1,6 +1,7 @@
 const fileTreeEl = document.getElementById("file-tree");
 const panelTreeEl = document.getElementById("panel-tree");
 const fileContextMenuEl = document.getElementById("file-context-menu");
+const textContextMenuEl = document.getElementById("text-context-menu");
 const btnNewFile = document.getElementById("btn-new-file");
 const btnNewFolder = document.getElementById("btn-new-folder");
 const editorEl = document.getElementById("editor");
@@ -2136,6 +2137,45 @@ async function deleteWorkspaceItem(path, type) {
   await loadFileTree();
 }
 
+/** 重命名工作区文件或文件夹。 */
+async function renameWorkspaceItem(path) {
+  if (!path) return;
+  const oldName = path.split("/").pop() || path;
+  const parentDir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  const newName = window.prompt(`重命名「${oldName}」`, oldName);
+  if (!newName || newName === oldName) return;
+
+  // 如果旧名有扩展名但新名没有，自动补上
+  const oldDot = oldName.lastIndexOf(".");
+  let finalName = newName;
+  if (oldDot >= 0 && newName.lastIndexOf(".") <= 0) {
+    finalName = newName + oldName.slice(oldDot);
+  }
+
+  const dest = parentDir ? `${parentDir}/${finalName}` : finalName;
+  try {
+    const res = await fetch("/api/files/move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: path, destination: dest }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert("重命名失败: " + (data.detail || res.statusText));
+      return;
+    }
+    const newPath = data.path || dest;
+    if (currentFile === path) {
+      currentFile = newPath;
+      currentFileLabel.textContent = newPath;
+    }
+    await loadFileTree();
+    revealFileInTree(newPath);
+  } catch (err) {
+    alert("重命名失败: " + (err.message || err));
+  }
+}
+
 /** 初始化左侧文件面板交互。 */
 function initFilePanel() {
   btnNewFile?.addEventListener("click", () => createWorkspaceFile());
@@ -2145,6 +2185,9 @@ function initFilePanel() {
 let fileContextBaseDir = "";
 let fileContextTargetPath = "";
 let fileContextTargetType = null;
+
+// 文件剪贴板（内存中，仅在当前页面会话有效）
+let fileClipboard = null; // { source: string, type: 'copy'|'cut' }
 
 /** 关闭文件树右键菜单。 */
 function hideFileContextMenu() {
@@ -2165,6 +2208,10 @@ function showFileContextMenu(clientX, clientY, ctx) {
     '[data-menu-section="target"]'
   );
   if (targetSection) targetSection.hidden = !onTarget;
+
+  // 剪贴板粘贴：仅在剪贴板有内容时可用
+  const pasteBtn = fileContextMenuEl.querySelector('[data-action="paste-file"]');
+  if (pasteBtn) pasteBtn.disabled = !fileClipboard;
 
   const deleteBtn = fileContextMenuEl.querySelector('[data-action="delete"]');
   if (deleteBtn && onTarget) {
@@ -2187,6 +2234,246 @@ function showFileContextMenu(clientX, clientY, ctx) {
   fileContextMenuEl.style.top = `${y}px`;
 }
 
+/** 将文件路径放入剪贴板（复制模式）。 */
+function copyFileToClipboard(path) {
+  if (!path) return;
+  fileClipboard = { source: path, type: "copy" };
+}
+
+/** 将文件路径放入剪贴板（剪切模式）。 */
+function cutFileToClipboard(path) {
+  if (!path) return;
+  fileClipboard = { source: path, type: "cut" };
+}
+
+/** 收集文件树中所有文件路径。 */
+function collectFileTreePaths() {
+  if (!fileTreeEl) return [];
+  return [...fileTreeEl.querySelectorAll(".file-tree-file")].map(
+    (li) => li.dataset.path || ""
+  );
+}
+
+/** 为粘贴操作生成不冲突的目标路径。 */
+function generatePasteDest(source, destDir, opType) {
+  const sourceName = source.split("/").pop() || source;
+  const baseDir = destDir ? normalizeWorkspacePath(destDir) : "";
+  const existingPaths = collectFileTreePaths();
+
+  const dotIdx = sourceName.lastIndexOf(".");
+  const stem = dotIdx >= 0 ? sourceName.slice(0, dotIdx) : sourceName;
+  const ext = dotIdx >= 0 ? sourceName.slice(dotIdx) : "";
+
+  function build(candidateName) {
+    return baseDir ? `${baseDir}/${candidateName}` : candidateName;
+  }
+
+  // 剪切：优先使用原名，仅冲突时才加后缀
+  if (opType === "cut") {
+    const original = build(sourceName);
+    if (!existingPaths.includes(original) && original !== source) {
+      return original;
+    }
+  }
+
+  // 复制 / 剪切冲突：逐次生成副本名
+  let suffix = ` - 副本${ext}`;
+  let counter = 2;
+  while (true) {
+    const candidate = build(`${stem}${suffix}`);
+    if (!existingPaths.includes(candidate) && candidate !== source) {
+      return candidate;
+    }
+    suffix = ` - 副本 (${counter})${ext}`;
+    counter++;
+  }
+}
+
+/** 从剪贴板粘贴文件到目标目录。 */
+async function pasteFileFromClipboard(destDir) {
+  if (!fileClipboard) return;
+  const { source, type } = fileClipboard;
+
+  const opLabel = type === "cut" ? "移动" : "复制";
+  const endpoint = type === "cut" ? "/api/files/move" : "/api/files/copy";
+  const dest = generatePasteDest(source, destDir, type);
+
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, destination: dest }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(`${opLabel}失败: ` + (data.detail || res.statusText));
+      return;
+    }
+    if (type === "cut") fileClipboard = null;
+    await loadFileTree();
+    revealFileInTree(data.path || dest);
+  } catch (err) {
+    alert(`${opLabel}失败: ` + (err.message || err));
+  }
+}
+
+// ---- 文本右键菜单 ----
+
+let textContextTargetEl = null;
+
+/** 关闭文本右键菜单。 */
+function hideTextContextMenu() {
+  textContextMenuEl?.classList.add("hidden");
+  textContextTargetEl = null;
+}
+
+/** 在光标处显示文本右键菜单。 */
+function showTextContextMenu(clientX, clientY, targetEl) {
+  if (!textContextMenuEl) return;
+  textContextTargetEl = targetEl || null;
+
+  const isEditable =
+    targetEl &&
+    (targetEl.tagName === "TEXTAREA" ||
+     targetEl.tagName === "INPUT" ||
+     targetEl.isContentEditable);
+
+  const hasSelection = isEditable
+    ? (targetEl.selectionStart !== undefined
+        ? targetEl.selectionStart !== targetEl.selectionEnd
+        : window.getSelection().toString().length > 0)
+    : window.getSelection().toString().length > 0;
+
+  const copyBtn = textContextMenuEl.querySelector('[data-action="text-copy"]');
+  const cutBtn = textContextMenuEl.querySelector('[data-action="text-cut"]');
+  const pasteBtn = textContextMenuEl.querySelector('[data-action="text-paste"]');
+  if (copyBtn) copyBtn.disabled = !hasSelection;
+  if (cutBtn) cutBtn.disabled = !hasSelection || !isEditable;
+  if (pasteBtn) pasteBtn.disabled = !isEditable;
+
+  textContextMenuEl.classList.remove("hidden");
+  const pad = 8;
+  const rect = textContextMenuEl.getBoundingClientRect();
+  let x = clientX;
+  let y = clientY;
+  if (x + rect.width > window.innerWidth - pad) {
+    x = Math.max(pad, window.innerWidth - rect.width - pad);
+  }
+  if (y + rect.height > window.innerHeight - pad) {
+    y = Math.max(pad, window.innerHeight - rect.height - pad);
+  }
+  textContextMenuEl.style.left = `${x}px`;
+  textContextMenuEl.style.top = `${y}px`;
+}
+
+/** 执行文本复制。 */
+function execTextCopy(el) {
+  if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) {
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    if (start !== end) {
+      navigator.clipboard.writeText(el.value.substring(start, end)).catch(() => {
+        document.execCommand("copy");
+      });
+    }
+  } else {
+    const sel = window.getSelection();
+    if (sel.toString()) {
+      navigator.clipboard.writeText(sel.toString()).catch(() => {
+        document.execCommand("copy");
+      });
+    }
+  }
+}
+
+/** 执行文本剪切。 */
+function execTextCut(el) {
+  if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) {
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    if (start !== end) {
+      navigator.clipboard.writeText(el.value.substring(start, end)).then(() => {
+        el.setRangeText("", start, end, "end");
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }).catch(() => {
+        document.execCommand("cut");
+      });
+    }
+  } else if (el && el.isContentEditable) {
+    navigator.clipboard.writeText(window.getSelection().toString()).then(() => {
+      document.execCommand("delete");
+    }).catch(() => {
+      document.execCommand("cut");
+    });
+  }
+}
+
+/** 执行文本粘贴。 */
+function execTextPaste(el) {
+  if (!el) return;
+  if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+    el.focus();
+    navigator.clipboard.readText().then((text) => {
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      el.setRangeText(text, start, end, "end");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }).catch(() => {
+      document.execCommand("paste");
+    });
+  } else if (el.isContentEditable) {
+    el.focus();
+    navigator.clipboard.readText().then((text) => {
+      document.execCommand("insertText", false, text);
+    }).catch(() => {
+      document.execCommand("paste");
+    });
+  }
+}
+
+/** 初始化文本区域右键菜单（编辑器、聊天输入框、聊天消息区、预览区）。 */
+function initTextContextMenu() {
+  if (!textContextMenuEl) return;
+
+  const textAreas = [editorEl, chatInput, editorPreviewEl, chatMessagesEl].filter(Boolean);
+
+  textAreas.forEach((el) => {
+    el.addEventListener("contextmenu", (e) => {
+      e.stopPropagation();
+      hideAppTooltip();
+      hideFileContextMenu();
+      hideTextContextMenu();
+      showTextContextMenu(e.clientX, e.clientY, el);
+    });
+  });
+
+  // 处理菜单项点击
+  textContextMenuEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn || btn.hidden || btn.closest("[hidden]")) return;
+    e.stopPropagation();
+    const action = btn.dataset.action;
+    const targetEl = textContextTargetEl;
+    hideTextContextMenu();
+    if (action === "text-copy") execTextCopy(targetEl);
+    else if (action === "text-cut") execTextCut(targetEl);
+    else if (action === "text-paste") execTextPaste(targetEl);
+  });
+
+  // 全局关闭
+  document.addEventListener("click", (e) => {
+    if (textContextMenuEl.classList.contains("hidden")) return;
+    if (textContextMenuEl.contains(e.target)) return;
+    hideTextContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideTextContextMenu();
+  });
+  window.addEventListener("resize", () => {
+    hideTextContextMenu();
+  });
+}
+
 /** 文件树区域右键：新建文件 / 新建文件夹。 */
 function initFileTreeContextMenu() {
   if (!panelTreeEl || !fileContextMenuEl) return;
@@ -2195,6 +2482,7 @@ function initFileTreeContextMenu() {
     if (!panelTreeEl.contains(e.target)) return;
     hideAppTooltip();
     hideFileContextMenu();
+    hideTextContextMenu();
     const ctx = resolveFileTreeContextTarget(e.target);
     showFileContextMenu(e.clientX, e.clientY, ctx);
   });
@@ -2210,6 +2498,10 @@ function initFileTreeContextMenu() {
     const action = btn.dataset.action;
     if (action === "new-file") createWorkspaceFile(base);
     else if (action === "new-folder") createWorkspaceFolder(base);
+    else if (action === "copy-file") copyFileToClipboard(targetPath);
+    else if (action === "cut-file") cutFileToClipboard(targetPath);
+    else if (action === "paste-file") pasteFileFromClipboard(base);
+    else if (action === "rename") renameWorkspaceItem(targetPath);
     else if (action === "delete") deleteWorkspaceItem(targetPath, targetType);
   });
 
@@ -2898,6 +3190,7 @@ function initLayoutResize() {
   initSettings();
   initFilePanel();
   initFileTreeContextMenu();
+  initTextContextMenu();
   initEditorViewMode();
   initLayoutResize();
   initAppTooltip();

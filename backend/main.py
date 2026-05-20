@@ -81,6 +81,13 @@ class ManualSaveRequest(BaseModel):
     record_change: bool = True
 
 
+class FileTransferRequest(BaseModel):
+    """POST /api/files/copy / move：复制/移动工作区文件。"""
+
+    source: str
+    destination: str
+
+
 class SessionTitleRequest(BaseModel):
     """PATCH /api/session/{id}/title：重命名会话。"""
 
@@ -311,6 +318,26 @@ def api_delete_path(path: str):
     try:
         deleted = workspace_fs.delete_path(path)
         return {"ok": True, "path": deleted}
+    except workspace_fs.WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/files/copy")
+def api_copy_path(body: FileTransferRequest):
+    """复制工作区文件或文件夹。"""
+    try:
+        result = workspace_fs.copy_path(body.source, body.destination)
+        return {"ok": True, "path": result}
+    except workspace_fs.WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/files/move")
+def api_move_path(body: FileTransferRequest):
+    """移动/重命名工作区文件或文件夹。"""
+    try:
+        result = workspace_fs.move_path(body.source, body.destination)
+        return {"ok": True, "path": result}
     except workspace_fs.WorkspaceError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
