@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=38" />
+  <link rel="stylesheet" href="/static/style.css?v=40" />
 </head>
 <body>
   <header class="topbar">
@@ -180,6 +180,34 @@
           <button type="button" id="btn-settings-clear-key" class="btn secondary">清除密钥</button>
         </div>
         <hr class="settings-divider" />
+        <h3 class="settings-section-title">飞书机器人</h3>
+        <p class="settings-hint settings-hint-muted settings-hint--top">
+          在 <a href="https://open.feishu.cn/" target="_blank" rel="noopener noreferrer">飞书开放平台</a> → 应用凭证 中复制 App ID / App Secret。推荐在飞书后台选<strong>使用长连接接收事件</strong>（无需 HTTPS 隧道）；启动本应用后再保存订阅方式。
+        </p>
+        <label class="settings-label" for="settings-feishu-app-id">App ID</label>
+        <input
+          type="text"
+          id="settings-feishu-app-id"
+          class="settings-input"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="cli_…"
+        />
+        <label class="settings-label" for="settings-feishu-app-secret">App Secret</label>
+        <input
+          type="password"
+          id="settings-feishu-app-secret"
+          class="settings-input"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <p id="settings-feishu-hint" class="settings-hint"></p>
+        <div class="settings-actions settings-actions--inline">
+          <button type="button" id="btn-settings-feishu-diagnose" class="btn secondary">检测连通</button>
+          <button type="button" id="btn-settings-clear-feishu" class="btn secondary">清除飞书配置</button>
+        </div>
+        <div id="settings-feishu-diagnostics" class="settings-feishu-diagnostics hidden" aria-live="polite"></div>
+        <hr class="settings-divider" />
         <h3 class="settings-section-title">长期记忆</h3>
         <p class="settings-hint settings-hint-muted settings-hint--top">
           跨会话偏好与习惯，存于本机 <code>data/memories/</code>。条目用 <code>§</code> 分隔；保存后<strong>新开的对话</strong>才会载入（当前对话仍用启动时的快照）。
@@ -202,10 +230,10 @@
           placeholder="工作区整理约定等（非笔记正文）…"
         ></textarea>
         <p id="settings-memory-memory-usage" class="settings-hint settings-usage-hint"></p>
-        <div class="settings-actions">
-          <button type="submit" class="btn">保存</button>
-        </div>
       </form>
+      <div class="settings-footer">
+        <button type="submit" form="settings-form" class="btn" id="btn-settings-save">保存</button>
+      </div>
     </div>
   </div>
   <div id="file-context-menu" class="context-menu hidden" role="menu" aria-label="文件操作" data-mode="blank">
@@ -236,6 +264,6 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
-  <script src="/static/app.js?v=41"></script>
+  <script src="/static/app.js?v=44"></script>
 </body>
 </html>

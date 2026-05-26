@@ -100,10 +100,25 @@ class SessionTitleRequest(BaseModel):
     title: str
 
 
-class SettingsUpdateRequest(BaseModel):
-    """PUT /api/settings：保存或清除 API Key。"""
+class FeishuSettingsUpdate(BaseModel):
+    """PUT /api/settings 中的飞书配置块（密钥留空表示不修改）。"""
 
-    api_key: str = ""
+    app_id: str | None = None
+    app_secret: str | None = None
+
+
+class SettingsUpdateRequest(BaseModel):
+    """PUT /api/settings：保存或清除 API Key 与飞书机器人配置。"""
+
+    api_key: str | None = None
+    feishu: FeishuSettingsUpdate | None = None
+    clear_feishu: bool = False
+
+
+class FeishuDiagnosticsRequest(BaseModel):
+    """POST /api/feishu/diagnostics：可选传入表单中的未保存凭证。"""
+
+    feishu: FeishuSettingsUpdate | None = None
 
 
 class MemoriesUpdateRequest(BaseModel):
@@ -113,26 +128,142 @@ class MemoriesUpdateRequest(BaseModel):
     memory: str = ""
 
 
+_FEISHU_SECRET_KEYS = ("app_secret",)
+_FEISHU_LEGACY_KEYS = ("verification_token", "encrypt_key")
+
+
+def _feishu_block_from_disk() -> dict:
+    """从 user_settings.json 读取 feishu 对象（不含环境变量覆盖）。"""
+    from backend.user_settings import load_settings
+
+    raw = load_settings().get("feishu")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _feishu_settings_status() -> dict:
+    """飞书配置展示块：app_id 明文，密钥 masked + configured，enabled 表示可启用 webhook。"""
+    from backend.user_settings import mask_api_key
+
+    block = _feishu_block_from_disk()
+    app_id = (block.get("app_id") or "").strip()
+    app_secret = (block.get("app_secret") or "").strip()
+    configured = bool(app_id and app_secret)
+    return {
+        "enabled": configured,
+        "configured": configured,
+        "app_id": app_id,
+        "app_secret_masked": mask_api_key(app_secret) if app_secret else "",
+        "app_secret_configured": bool(app_secret),
+    }
+
+
+def _apply_feishu_settings(
+    feishu: FeishuSettingsUpdate | None,
+    *,
+    clear: bool = False,
+) -> None:
+    """写入或清除 user_settings.json 中的 feishu 块；密钥留空不覆盖旧值。"""
+    from backend.user_settings import load_settings, save_settings
+
+    data = load_settings()
+    if clear:
+        data.pop("feishu", None)
+        save_settings(data)
+        return
+    if feishu is None:
+        return
+    block = dict(data.get("feishu") or {}) if isinstance(data.get("feishu"), dict) else {}
+    if feishu.app_id is not None:
+        block["app_id"] = feishu.app_id.strip()
+    for key in _FEISHU_SECRET_KEYS:
+        val = getattr(feishu, key, None)
+        if val is None:
+            continue
+        cleaned = val.strip()
+        if cleaned:
+            block[key] = cleaned
+    for key in _FEISHU_LEGACY_KEYS:
+        block.pop(key, None)
+    if block:
+        data["feishu"] = block
+    else:
+        data.pop("feishu", None)
+    save_settings(data)
+
+
+def _invalidate_feishu_token_cache() -> None:
+    """保存飞书凭证后使 tenant_access_token 内存缓存失效（F2 实现后生效）。"""
+    try:
+        from backend.channels.feishu.token import invalidate_token_cache
+    except ImportError:
+        return
+    invalidate_token_cache()
+
+
+def _settings_payload() -> dict:
+    """GET /api/settings 完整响应（API Key + 飞书）。"""
+    return {**api_key_status(), "feishu": _feishu_settings_status()}
+
+
 @app.on_event("startup")
 def _on_startup() -> None:
-    """应用启动：从 user_settings 注入 API Key 到环境变量。"""
+    """应用启动：注入 API Key，并启动飞书 WebSocket 长连接（若已配置）。"""
     bootstrap_api_key_from_disk()
+    try:
+        from backend.channels.feishu.ws_client import start_feishu_ws_client
+
+        if start_feishu_ws_client():
+            import logging
+
+            logging.getLogger(__name__).info(
+                "飞书长连接后台线程已启动；请在飞书后台选择「使用长连接接收事件」"
+            )
+    except ImportError:
+        pass
+
+
+try:
+    from backend.channels.feishu import router as feishu_router
+
+    app.include_router(feishu_router)
+except ImportError:
+    pass
 
 
 @app.get("/api/settings")
 def api_get_settings():
-    """读取 API Key 配置状态（脱敏）。"""
-    return api_key_status()
+    """读取 API Key 与飞书配置状态（脱敏）。"""
+    return _settings_payload()
 
 
 @app.put("/api/settings")
 def api_update_settings(body: SettingsUpdateRequest):
-    """保存或清除 DeepSeek API Key，并清空 Agent 缓存。"""
+    """保存或清除 DeepSeek API Key / 飞书配置，并清空 Agent 缓存。"""
     from backend.agent import clear_agent_cache
 
-    set_api_key(body.api_key)
+    if body.api_key is not None:
+        set_api_key(body.api_key)
+    if body.clear_feishu:
+        _apply_feishu_settings(None, clear=True)
+    elif body.feishu is not None:
+        _apply_feishu_settings(body.feishu)
     clear_agent_cache()
-    return {"ok": True, **api_key_status()}
+    _invalidate_feishu_token_cache()
+    return {"ok": True, **_settings_payload()}
+
+
+@app.post("/api/feishu/diagnostics")
+def api_feishu_diagnostics(body: FeishuDiagnosticsRequest | None = None):
+    """检测飞书凭证、本机 webhook 与 Agent 依赖项。"""
+    try:
+        from backend.channels.feishu.diagnostics import run_feishu_diagnostics
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail="飞书渠道模块未就绪") from e
+
+    override: dict | None = None
+    if body and body.feishu is not None:
+        override = body.feishu.model_dump(exclude_none=True)
+    return run_feishu_diagnostics(override=override)
 
 
 @app.get("/api/memories")
@@ -418,23 +549,8 @@ def api_write_file(path: str, body: ManualSaveRequest):
 
 
 def _persist_chat_turn(user_text: str, done: dict) -> str | None:
-    """把 chat_stream 的 done 事件写入 session chat_log（含 steps、变更 id）。返回自动生成的标题（若有）。"""
-    from backend.session_store import store
-
-    turn = done["turn"]
-    store.append_chat_message("user", user_text, turn=turn)
-    store.append_chat_message(
-        "assistant",
-        done.get("reply", ""),
-        turn=turn,
-        steps=done.get("steps"),
-        reasoning=done.get("reasoning"),
-        usage=done.get("usage"),
-    )
-    changes = done.get("changes") or []
-    if changes:
-        store.append_chat_changes(turn, [c["id"] for c in changes])
-    return done.get("session_title")
+    """把 chat_stream 的 done 事件写入 session chat_log（委托 agent.persist_chat_turn）。"""
+    return agent.persist_chat_turn(user_text, done)
 
 
 @app.delete("/api/session/{session_id}")

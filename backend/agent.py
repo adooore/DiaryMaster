@@ -70,6 +70,7 @@ _written_this_turn: list[str] = []  # 本轮 Agent 写过的文件路径
 _changes_this_turn: list[FileChange] = []  # 本轮产生的 FileChange 对象
 _current_turn: int = 0  # 与 session_store.turn 对齐
 _collected_steps: list[dict[str, Any]] = []  # 本轮步骤快照，结束时写入 done 事件
+_chat_channel: str | None = None  # IM 等无 UI 渠道（如 feishu），供工具策略使用
 
 # 发给大模型的系统提示（与各 @tool 的 docstring 一起约束行为）。
 SYSTEM_PROMPT = f"""你是 DiaryMaster 的笔记助手，像朋友一样帮助用户整理和修改笔记。
@@ -281,6 +282,20 @@ def _run_tool_step(tool: str, label: str, path: str | None, work: Callable[[], s
             "path": path,
         }
     )
+    if tool in DANGEROUS_TOOLS and _chat_channel == "feishu":
+        result = "飞书渠道不支持删除，请在浏览器中操作。"
+        _publish(
+            {
+                "id": step_id,
+                "kind": "tool",
+                "tool": tool,
+                "status": "done",
+                "label": label,
+                "path": path,
+                "detail": result,
+            }
+        )
+        return result
     if tool in DANGEROUS_TOOLS:
         approved = require_tool_confirmation(
             tool=tool,
@@ -789,6 +804,7 @@ def chat_stream(
                 current_file,
                 model_id=model_id,
                 thinking_enabled=thinking_enabled,
+                channel=None,
             ):
                 event_q.put(evt)
         finally:
@@ -817,25 +833,45 @@ def chat_stream(
         set_active_registry(None)
 
 
+def persist_chat_turn(user_text: str, done: dict) -> str | None:
+    """把 done 事件写入 session chat_log（与 Web SSE 持久化一致）。返回自动标题（若有）。"""
+    turn = done["turn"]
+    store.append_chat_message("user", user_text, turn=turn)
+    store.append_chat_message(
+        "assistant",
+        done.get("reply", ""),
+        turn=turn,
+        steps=done.get("steps"),
+        reasoning=done.get("reasoning"),
+        usage=done.get("usage"),
+    )
+    changes = done.get("changes") or []
+    if changes:
+        store.append_chat_changes(turn, [c["id"] for c in changes])
+    return done.get("session_title")
+
+
 def _chat_stream_events(
     user_message: str,
     current_file: str | None = None,
     *,
     model_id: str | None = None,
     thinking_enabled: bool = False,
+    channel: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """
     单轮对话事件生成器（供 chat_stream 后台线程调用）。
 
     产出 step / done / error；危险工具确认由 tool_confirm 在工具线程内阻塞处理。
     """
-    global _written_this_turn, _changes_this_turn, _current_turn, _collected_steps
+    global _written_this_turn, _changes_this_turn, _current_turn, _collected_steps, _chat_channel
 
     _written_this_turn = []
     _changes_this_turn = []
     _collected_steps = []
     _current_turn = store.begin_turn()
     turn = _current_turn
+    _chat_channel = channel
 
     mid = validate_model_id(model_id)
     thinking = bool(thinking_enabled)
@@ -987,7 +1023,45 @@ def _chat_stream_events(
             yield from _flush_pending(pending)
         yield {"type": "error", "detail": str(e), "turn": turn}
     finally:
+        _chat_channel = None
         clear_step_emitter()
+
+
+def chat_once(
+    user_message: str,
+    *,
+    model_id: str | None = None,
+    current_file: str | None = None,
+    thinking_enabled: bool = False,
+    channel: str | None = None,
+) -> dict[str, Any]:
+    """
+    非流式单轮对话（飞书等 IM 入口）：不注册 ConfirmRegistry，完成后持久化 chat_log。
+
+    返回 {"type":"done", "reply":...} 或 {"type":"error", "detail":...}。
+    """
+    user_text = user_message.strip()
+    if not user_text:
+        return {"type": "error", "detail": "消息不能为空"}
+    done: dict[str, Any] | None = None
+    try:
+        for event in _chat_stream_events(
+            user_text,
+            current_file,
+            model_id=model_id,
+            thinking_enabled=thinking_enabled,
+            channel=channel,
+        ):
+            if event.get("type") == "done":
+                done = event
+            elif event.get("type") == "error":
+                return event
+        if not done:
+            return {"type": "error", "detail": "Agent 未返回结果"}
+        persist_chat_turn(user_text, done)
+        return done
+    except Exception as e:
+        return {"type": "error", "detail": str(e)}
 
 
 def chat(

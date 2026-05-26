@@ -31,6 +31,12 @@ const settingsForm = document.getElementById("settings-form");
 const settingsApiKeyInput = document.getElementById("settings-api-key");
 const settingsApiKeyHint = document.getElementById("settings-api-key-hint");
 const btnSettingsClearKey = document.getElementById("btn-settings-clear-key");
+const settingsFeishuAppIdInput = document.getElementById("settings-feishu-app-id");
+const settingsFeishuAppSecretInput = document.getElementById("settings-feishu-app-secret");
+const settingsFeishuHint = document.getElementById("settings-feishu-hint");
+const btnSettingsFeishuDiagnose = document.getElementById("btn-settings-feishu-diagnose");
+const settingsFeishuDiagnostics = document.getElementById("settings-feishu-diagnostics");
+const btnSettingsClearFeishu = document.getElementById("btn-settings-clear-feishu");
 const settingsMemoryUserInput = document.getElementById("settings-memory-user");
 const settingsMemoryMemoryInput = document.getElementById("settings-memory-memory");
 const settingsMemoryUserUsage = document.getElementById("settings-memory-user-usage");
@@ -2929,7 +2935,131 @@ async function saveMemoriesFromForm() {
   if (m) updateMemoryUsageHint(settingsMemoryMemoryUsage, m.used, m.limit, m.percent);
 }
 
-/** 加载 API Key 配置状态到设置表单。 */
+/** 将飞书配置状态填入设置表单（密钥输入框留空表示不修改）。 */
+function applyFeishuSettingsToForm(feishu) {
+  if (!settingsFeishuAppIdInput || !settingsFeishuHint) return;
+  const block = feishu || {};
+  settingsFeishuAppIdInput.value = block.app_id || "";
+  if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
+
+  const parts = [];
+  if (block.app_secret_configured && block.app_secret_masked) {
+    parts.push(`Secret ${block.app_secret_masked}`);
+  }
+  if (block.enabled) {
+    settingsFeishuHint.textContent =
+      parts.length > 0
+        ? `已配置：${parts.join("；")}（Secret 留空并保存则不会修改）`
+        : "飞书 App ID / Secret 已齐全，可启用 webhook。";
+    settingsFeishuHint.className = "settings-hint ok";
+    if (settingsFeishuAppSecretInput) {
+      settingsFeishuAppSecretInput.placeholder = "留空不修改…";
+    }
+  } else if (block.app_id) {
+    settingsFeishuHint.textContent = "已填写 App ID，请补全 App Secret 后保存。";
+    settingsFeishuHint.className = "settings-hint warn";
+  } else {
+    settingsFeishuHint.textContent = "尚未配置飞书机器人（需 App ID 与 App Secret）。";
+    settingsFeishuHint.className = "settings-hint warn";
+    if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.placeholder = "";
+  }
+}
+
+/** 从设置表单收集飞书 PUT 载荷（仅包含有值的字段；全空则不下发）。 */
+function buildFeishuSettingsPayload() {
+  if (!settingsFeishuAppIdInput) return null;
+  const appId = settingsFeishuAppIdInput.value.trim();
+  const secret = settingsFeishuAppSecretInput?.value?.trim() || "";
+  if (!appId && !secret) return null;
+  const feishu = {};
+  if (appId) feishu.app_id = appId;
+  if (secret) feishu.app_secret = secret;
+  return feishu;
+}
+
+/** 转义 HTML 特殊字符（用于检测结果等纯文本插值）。 */
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 渲染飞书连通性检测结果。 */
+function renderFeishuDiagnostics(data) {
+  if (!settingsFeishuDiagnostics || !data) return;
+  settingsFeishuDiagnostics.classList.remove("hidden");
+  settingsFeishuDiagnostics.className = `settings-feishu-diagnostics settings-feishu-diagnostics--${data.overall || "warn"}`;
+
+  const badgeLabel = { ok: "通过", warn: "注意", fail: "失败", skip: "跳过" };
+  const items = (data.checks || [])
+    .map((c) => {
+      const st = c.status || "warn";
+      const hint = c.hint
+        ? `<p class="settings-feishu-diagnostics-hint">${escapeHtml(c.hint)}</p>`
+        : "";
+      return `<li class="settings-feishu-diagnostics-item">
+        <div class="settings-feishu-diagnostics-item-head">
+          <span class="settings-feishu-diagnostics-badge settings-feishu-diagnostics-badge--${st}">${badgeLabel[st] || st}</span>
+          <span class="settings-feishu-diagnostics-label">${escapeHtml(c.label || "")}</span>
+        </div>
+        <p class="settings-feishu-diagnostics-detail">${escapeHtml(c.detail || "")}</p>
+        ${hint}
+      </li>`;
+    })
+    .join("");
+
+  settingsFeishuDiagnostics.innerHTML = `<p class="settings-feishu-diagnostics-summary">${escapeHtml(data.summary || "检测完成")}</p><ul class="settings-feishu-diagnostics-list">${items}</ul>`;
+}
+
+/** 调用后端检测飞书渠道连通性（可使用表单中未保存的凭证试连 Token）。 */
+async function runFeishuDiagnostics() {
+  const feishu = buildFeishuSettingsPayload();
+  const body = feishu ? { feishu } : {};
+  if (btnSettingsFeishuDiagnose) {
+    btnSettingsFeishuDiagnose.disabled = true;
+    btnSettingsFeishuDiagnose.textContent = "检测中…";
+  }
+  if (settingsFeishuDiagnostics) {
+    settingsFeishuDiagnostics.classList.remove("hidden");
+    settingsFeishuDiagnostics.className = "settings-feishu-diagnostics";
+    settingsFeishuDiagnostics.innerHTML =
+      '<p class="settings-feishu-diagnostics-summary">正在检测…</p>';
+  }
+  try {
+    const res = await fetch("/api/feishu/diagnostics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || res.statusText || "检测失败");
+    }
+    renderFeishuDiagnostics(data);
+  } catch (err) {
+    renderFeishuDiagnostics({
+      overall: "fail",
+      summary: "检测请求失败",
+      checks: [
+        {
+          status: "fail",
+          label: "请求错误",
+          detail: err.message || String(err),
+          hint: "确认 DiaryMaster 服务已启动并已刷新页面",
+        },
+      ],
+    });
+  } finally {
+    if (btnSettingsFeishuDiagnose) {
+      btnSettingsFeishuDiagnose.disabled = false;
+      btnSettingsFeishuDiagnose.textContent = "检测连通";
+    }
+  }
+}
+
+/** 加载 API Key 与飞书配置状态到设置表单。 */
 async function loadSettingsIntoForm() {
   if (!settingsApiKeyInput || !settingsApiKeyHint) return;
   settingsApiKeyInput.value = "";
@@ -2946,19 +3076,24 @@ async function loadSettingsIntoForm() {
       settingsApiKeyHint.className = "settings-hint warn";
       settingsApiKeyInput.placeholder = "sk-…";
     }
+    applyFeishuSettingsToForm(data.feishu);
   } catch {
     settingsApiKeyHint.textContent = "无法读取设置状态";
     settingsApiKeyHint.className = "settings-hint warn";
+    if (settingsFeishuHint) {
+      settingsFeishuHint.textContent = "无法读取飞书配置状态";
+      settingsFeishuHint.className = "settings-hint warn";
+    }
   }
   await loadMemoriesIntoForm();
 }
 
-/** 保存或清除 API Key 到后端。 */
-async function saveSettingsApiKey(apiKey) {
+/** 保存 API Key 与可选飞书配置到后端。 */
+async function saveSettings(payload) {
   const res = await fetch("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_key: apiKey }),
+    body: JSON.stringify(payload),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -2986,7 +3121,7 @@ function initSettings() {
   btnSettingsClearKey?.addEventListener("click", async () => {
     if (!confirm("确定清除本机保存的 API Key？")) return;
     try {
-      await saveSettingsApiKey("");
+      await saveSettings({ api_key: "" });
       settingsApiKeyInput.value = "";
       await loadSettingsIntoForm();
     } catch (err) {
@@ -2994,16 +3129,39 @@ function initSettings() {
     }
   });
 
+  btnSettingsClearFeishu?.addEventListener("click", async () => {
+    if (!confirm("确定清除本机保存的飞书机器人配置？")) return;
+    try {
+      await saveSettings({ clear_feishu: true });
+      if (settingsFeishuAppIdInput) settingsFeishuAppIdInput.value = "";
+      if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
+      if (settingsFeishuDiagnostics) {
+        settingsFeishuDiagnostics.classList.add("hidden");
+        settingsFeishuDiagnostics.innerHTML = "";
+      }
+      await loadSettingsIntoForm();
+    } catch (err) {
+      alert("清除失败: " + (err.message || err));
+    }
+  });
+
+  btnSettingsFeishuDiagnose?.addEventListener("click", () => {
+    runFeishuDiagnostics();
+  });
+
   bindMemoryUsageLive();
 
   settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const value = settingsApiKeyInput?.value?.trim() || "";
+    const apiKey = settingsApiKeyInput?.value?.trim() || "";
+    const feishu = buildFeishuSettingsPayload();
+    const payload = {};
+    if (apiKey) payload.api_key = apiKey;
+    if (feishu) payload.feishu = feishu;
     try {
-      if (value) {
-        await saveSettingsApiKey(value);
-        settingsApiKeyInput.value = "";
-      }
+      await saveSettings(payload);
+      settingsApiKeyInput.value = "";
+      if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
       await saveMemoriesFromForm();
       await loadSettingsIntoForm();
       setSettingsOpen(false);

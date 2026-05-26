@@ -2077,9 +2077,11 @@ body.layout-resizing .resize-handle.dragging::after {
 }
 
 .settings-panel {
+  display: flex;
+  flex-direction: column;
   width: min(560px, 100%);
   max-height: min(90vh, 720px);
-  overflow: auto;
+  overflow: hidden;
   border-radius: 14px;
   border: 1px solid var(--border-strong);
   background: var(--popover-bg);
@@ -2103,7 +2105,19 @@ body.layout-resizing .resize-handle.dragging::after {
 }
 
 .settings-form {
-  padding: 16px 18px 18px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px 12px;
+}
+
+.settings-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--popover-bg);
 }
 
 .settings-label {
@@ -2224,6 +2238,107 @@ body.layout-resizing .resize-handle.dragging::after {
 
 .settings-usage-hint.warn {
   color: var(--warning);
+}
+
+.settings-feishu-diagnostics {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-main);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-feishu-diagnostics.hidden {
+  display: none;
+}
+
+.settings-feishu-diagnostics--ok {
+  border-color: rgba(72, 160, 120, 0.45);
+}
+
+.settings-feishu-diagnostics--warn {
+  border-color: rgba(200, 160, 60, 0.5);
+}
+
+.settings-feishu-diagnostics--fail {
+  border-color: rgba(196, 68, 68, 0.5);
+}
+
+.settings-feishu-diagnostics-summary {
+  margin: 0 0 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-feishu-diagnostics-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-feishu-diagnostics-item {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-feishu-diagnostics-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.settings-feishu-diagnostics-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.settings-feishu-diagnostics-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.settings-feishu-diagnostics-badge--ok {
+  color: var(--success);
+  background: rgba(72, 160, 120, 0.15);
+}
+
+.settings-feishu-diagnostics-badge--warn {
+  color: var(--warning);
+  background: rgba(200, 160, 60, 0.15);
+}
+
+.settings-feishu-diagnostics-badge--fail {
+  color: #e88;
+  background: rgba(196, 68, 68, 0.15);
+}
+
+.settings-feishu-diagnostics-badge--skip {
+  color: var(--text-muted);
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.settings-feishu-diagnostics-label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-feishu-diagnostics-detail {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.settings-feishu-diagnostics-hint {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 ::-webkit-scrollbar {

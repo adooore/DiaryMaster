@@ -1,0 +1,10 @@
+﻿# 本机 Python 虚拟环境（勿纳入 Agent / Review / 索引）
+pyenv/
+pyenv.zip
+get-pip.py
+
+# 与 .gitignore 对齐的常见本地目录
+data/
+workspace/
+.env
+.env.*
