@@ -105,12 +105,15 @@ class FeishuSettingsUpdate(BaseModel):
 
     app_id: str | None = None
     app_secret: str | None = None
+    reply_display: str | None = None
+    card_backend: str | None = None
 
 
 class SettingsUpdateRequest(BaseModel):
     """PUT /api/settings：保存或清除 API Key 与飞书机器人配置。"""
 
     api_key: str | None = None
+    ui_theme: str | None = None
     feishu: FeishuSettingsUpdate | None = None
     clear_feishu: bool = False
 
@@ -144,6 +147,8 @@ def _feishu_settings_status() -> dict:
     """飞书配置展示块：app_id 明文，密钥 masked + configured，enabled 表示可启用 webhook。"""
     from backend.user_settings import mask_api_key
 
+    from backend.channels.feishu.channel_config import channel_config_for_api
+
     block = _feishu_block_from_disk()
     app_id = (block.get("app_id") or "").strip()
     app_secret = (block.get("app_secret") or "").strip()
@@ -154,6 +159,7 @@ def _feishu_settings_status() -> dict:
         "app_id": app_id,
         "app_secret_masked": mask_api_key(app_secret) if app_secret else "",
         "app_secret_configured": bool(app_secret),
+        **channel_config_for_api(),
     }
 
 
@@ -172,6 +178,15 @@ def _apply_feishu_settings(
         return
     if feishu is None:
         return
+    if feishu.reply_display is not None or feishu.card_backend is not None:
+        from backend.channels.feishu.channel_config import apply_channel_config_patch
+
+        patch: dict[str, str] = {}
+        if feishu.reply_display is not None:
+            patch["reply_display"] = feishu.reply_display
+        if feishu.card_backend is not None:
+            patch["card_backend"] = feishu.card_backend
+        apply_channel_config_patch(patch)
     block = dict(data.get("feishu") or {}) if isinstance(data.get("feishu"), dict) else {}
     if feishu.app_id is not None:
         block["app_id"] = feishu.app_id.strip()
@@ -201,8 +216,10 @@ def _invalidate_feishu_token_cache() -> None:
 
 
 def _settings_payload() -> dict:
-    """GET /api/settings 完整响应（API Key + 飞书）。"""
-    return {**api_key_status(), "feishu": _feishu_settings_status()}
+    """GET /api/settings 完整响应（API Key + 飞书 + UI 主题）。"""
+    from backend.ui_theme import ui_theme_for_api
+
+    return {**api_key_status(), **ui_theme_for_api(), "feishu": _feishu_settings_status()}
 
 
 @app.on_event("startup")
@@ -243,6 +260,10 @@ def api_update_settings(body: SettingsUpdateRequest):
 
     if body.api_key is not None:
         set_api_key(body.api_key)
+    if body.ui_theme is not None:
+        from backend.ui_theme import set_ui_theme
+
+        set_ui_theme(body.ui_theme)
     if body.clear_feishu:
         _apply_feishu_settings(None, clear=True)
     elif body.feishu is not None:

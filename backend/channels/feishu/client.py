@@ -1,4 +1,4 @@
-"""飞书 IM 发消息 Open API 封装。"""
+"""飞书 IM 发消息 Open API 封装（文本与 interactive 卡片）。"""
 
 from __future__ import annotations
 
@@ -28,36 +28,41 @@ def _format_api_error(data: dict[str, Any], http_code: int | None = None) -> str
     return f"{prefix}：{msg}"
 
 
-def _post_message(
-    receive_id: str,
-    receive_id_type: str,
-    text: str,
-) -> None:
-    """调用 im/v1/messages 发送一条文本消息。"""
+def _parse_api_response(raw: str, *, expect_message_id: bool = False) -> str:
+    """解析飞书 Open API JSON 响应；可选返回 message_id。"""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise FeishuClientError("飞书发消息响应不是合法 JSON") from e
+    if data.get("code") != 0:
+        raise FeishuClientError(_format_api_error(data))
+    if not expect_message_id:
+        return ""
+    payload = data.get("data") or {}
+    if not isinstance(payload, dict):
+        raise FeishuClientError("飞书发消息响应缺少 data")
+    message_id = (payload.get("message_id") or "").strip()
+    if not message_id:
+        raise FeishuClientError("飞书发消息响应缺少 message_id")
+    return message_id
+
+
+def _request_json(
+    url: str,
+    *,
+    method: str,
+    body: bytes | None = None,
+) -> str:
+    """发起带 tenant token 的 JSON 请求并返回响应文本。"""
     token = get_tenant_access_token()
-    query = urllib.parse.urlencode({"receive_id_type": receive_id_type})
-    url = f"{_FEISHU_API_BASE}{_MESSAGES_PATH}?{query}"
-    content = json.dumps({"text": text}, ensure_ascii=False)
-    body = json.dumps(
-        {
-            "receive_id": receive_id,
-            "msg_type": "text",
-            "content": content,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Bearer {token}",
-        },
-    )
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": f"Bearer {token}",
+    }
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
+            return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
         try:
@@ -70,12 +75,91 @@ def _post_message(
     except urllib.error.URLError as e:
         raise FeishuClientError(f"飞书发消息网络错误：{e.reason}") from e
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise FeishuClientError("飞书发消息响应不是合法 JSON") from e
-    if data.get("code") != 0:
-        raise FeishuClientError(_format_api_error(data))
+
+def send_text_message(
+    receive_id: str,
+    receive_id_type: str,
+    text: str,
+) -> str:
+    """
+    发送单条文本消息并返回 message_id（供后续 PUT 更新）。
+
+    不做长文分段；状态消息与最终回复更新应使用本函数 + update_text。
+    """
+    if not (text or "").strip():
+        raise FeishuClientError("消息正文为空")
+    query = urllib.parse.urlencode({"receive_id_type": receive_id_type})
+    url = f"{_FEISHU_API_BASE}{_MESSAGES_PATH}?{query}"
+    content = json.dumps({"text": text}, ensure_ascii=False)
+    body = json.dumps(
+        {
+            "receive_id": receive_id,
+            "msg_type": "text",
+            "content": content,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    raw = _request_json(url, method="POST", body=body)
+    return _parse_api_response(raw, expect_message_id=True)
+
+
+def send_interactive_card(
+    receive_id: str,
+    receive_id_type: str,
+    card: dict[str, Any],
+) -> str:
+    """发送 interactive 卡片消息并返回 message_id（供后续 PATCH 更新）。"""
+    query = urllib.parse.urlencode({"receive_id_type": receive_id_type})
+    url = f"{_FEISHU_API_BASE}{_MESSAGES_PATH}?{query}"
+    content = json.dumps(card, ensure_ascii=False)
+    body = json.dumps(
+        {
+            "receive_id": receive_id,
+            "msg_type": "interactive",
+            "content": content,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    raw = _request_json(url, method="POST", body=body)
+    return _parse_api_response(raw, expect_message_id=True)
+
+
+def update_interactive_card(message_id: str, card: dict[str, Any]) -> None:
+    """PATCH 更新已发送的 interactive 卡片（需卡片 config.update_multi=true 与 im:message:update）。"""
+    if not message_id:
+        raise FeishuClientError("message_id 为空")
+    url = f"{_FEISHU_API_BASE}{_MESSAGES_PATH}/{urllib.parse.quote(message_id, safe='')}"
+    content = json.dumps(card, ensure_ascii=False)
+    body = json.dumps({"content": content}, ensure_ascii=False).encode("utf-8")
+    raw = _request_json(url, method="PATCH", body=body)
+    _parse_api_response(raw)
+
+
+def update_text(message_id: str, text: str) -> None:
+    """更新机器人已发送的文本消息（im:message:update）。"""
+    if not message_id:
+        raise FeishuClientError("message_id 为空")
+    if not (text or "").strip():
+        raise FeishuClientError("更新内容为空")
+    if len(text) > _TEXT_SEGMENT_CHARS:
+        text = text[: _TEXT_SEGMENT_CHARS - 20] + "\n…（内容过长已截断）"
+    url = f"{_FEISHU_API_BASE}{_MESSAGES_PATH}/{urllib.parse.quote(message_id, safe='')}"
+    content = json.dumps({"text": text}, ensure_ascii=False)
+    body = json.dumps(
+        {"msg_type": "text", "content": content},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    raw = _request_json(url, method="PUT", body=body)
+    _parse_api_response(raw)
+
+
+def _post_message(
+    receive_id: str,
+    receive_id_type: str,
+    text: str,
+) -> None:
+    """调用 im/v1/messages 发送一条文本消息（不返回 message_id）。"""
+    send_text_message(receive_id, receive_id_type, text)
 
 
 def send_text(

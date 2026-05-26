@@ -12,7 +12,12 @@ from typing import Any
 
 from backend.channels.feishu.activity import record_dispatch_result, record_webhook_request
 from backend.channels.feishu.bind import activate_session_for_open_id
-from backend.channels.feishu.client import send_text, user_facing_error
+from backend.channels.feishu.client import (
+    FeishuClientError,
+    send_text,
+    user_facing_error,
+)
+from backend.channels.feishu.status_message import start_status_message
 from backend.channels.feishu.config import is_enabled
 from backend.config import APP_ROOT, get_api_key
 
@@ -210,6 +215,24 @@ def _reply_target(open_id: str, chat_id: str, chat_type: str = "") -> tuple[str,
     return "", ""
 
 
+def _finalize_feishu_reply(
+    updater: Any,
+    *,
+    receive_id: str,
+    receive_id_type: str,
+    reply: str,
+) -> None:
+    """将状态消息更新为最终展示（是否保留过程由 data/feishu/config.json 决定）。"""
+    from backend.channels.feishu.channel_config import keep_process_in_final_message
+
+    updater.finalize_to(
+        (reply or "").strip() or "（无文本回复）",
+        receive_id=receive_id,
+        receive_id_type=receive_id_type,
+        keep_process=keep_process_in_final_message(),
+    )
+
+
 def _process_message(
     *,
     open_id: str,
@@ -217,7 +240,7 @@ def _process_message(
     receive_id: str,
     receive_id_type: str,
 ) -> None:
-    """绑定 Session、调用 chat_once、将回复发往飞书。"""
+    """绑定 Session、调用 chat_once（步骤更新同一条飞书卡片）、最终 PATCH 回复。"""
     if not get_api_key():
         send_text(
             receive_id,
@@ -227,8 +250,18 @@ def _process_message(
         return
 
     try:
+        status = start_status_message(receive_id, receive_id_type)
+    except FeishuClientError as e:
+        _log.warning("飞书状态消息发送失败，回退为仅最终回复: %s", e)
+        status = None
+
+    try:
         activate_session_for_open_id(open_id)
         from backend.agent import chat_once
+
+        def on_step(step: dict[str, Any]) -> None:
+            if status is not None:
+                status.on_step(step)
 
         result = chat_once(
             text,
@@ -236,30 +269,54 @@ def _process_message(
             current_file=None,
             thinking_enabled=False,
             channel="feishu",
+            on_step=on_step,
         )
     except Exception as e:
         _log.exception("飞书渠道 Agent 调用失败")
         record_dispatch_result("error", str(e)[:200])
-        try:
-            send_text(receive_id, receive_id_type, user_facing_error(e))
-        except Exception:
-            _log.exception("飞书发送错误提示失败")
+        err_text = user_facing_error(e)
+        if status is not None:
+            try:
+                status.finalize_to(
+                    err_text, receive_id=receive_id, receive_id_type=receive_id_type
+                )
+            except Exception:
+                send_text(receive_id, receive_id_type, err_text)
+        else:
+            send_text(receive_id, receive_id_type, err_text)
         return
 
     if result.get("type") == "error":
         detail = result.get("detail") or "未知错误"
-        send_text(receive_id, receive_id_type, f"处理失败：{detail}")
+        err_text = f"处理失败：{detail}"
+        if status is not None:
+            status.finalize_to(
+                err_text, receive_id=receive_id, receive_id_type=receive_id_type
+            )
+        else:
+            send_text(receive_id, receive_id_type, err_text)
         return
 
     if result.get("type") != "done":
-        send_text(receive_id, receive_id_type, "未收到完整回复，请重试。")
+        msg = "未收到完整回复，请重试。"
+        if status is not None:
+            status.finalize_to(msg, receive_id=receive_id, receive_id_type=receive_id_type)
+        else:
+            send_text(receive_id, receive_id_type, msg)
         return
 
     reply = (result.get("reply") or "").strip()
-    if not reply:
-        reply = "（无文本回复）"
     try:
-        send_text(receive_id, receive_id_type, reply)
+        if status is not None:
+            status.flush_progress(force=True)
+            _finalize_feishu_reply(
+                status,
+                receive_id=receive_id,
+                receive_id_type=receive_id_type,
+                reply=reply,
+            )
+        else:
+            send_text(receive_id, receive_id_type, reply or "（无文本回复）")
     except Exception as e:
         _log.exception("飞书发送回复失败")
         try:

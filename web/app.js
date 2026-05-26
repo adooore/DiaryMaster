@@ -33,6 +33,8 @@ const settingsApiKeyHint = document.getElementById("settings-api-key-hint");
 const btnSettingsClearKey = document.getElementById("btn-settings-clear-key");
 const settingsFeishuAppIdInput = document.getElementById("settings-feishu-app-id");
 const settingsFeishuAppSecretInput = document.getElementById("settings-feishu-app-secret");
+const settingsFeishuReplyDisplaySelect = document.getElementById("settings-feishu-reply-display");
+const settingsFeishuCardBackendSelect = document.getElementById("settings-feishu-card-backend");
 const settingsFeishuHint = document.getElementById("settings-feishu-hint");
 const btnSettingsFeishuDiagnose = document.getElementById("btn-settings-feishu-diagnose");
 const settingsFeishuDiagnostics = document.getElementById("settings-feishu-diagnostics");
@@ -2941,6 +2943,31 @@ function applyFeishuSettingsToForm(feishu) {
   const block = feishu || {};
   settingsFeishuAppIdInput.value = block.app_id || "";
   if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
+  if (settingsFeishuReplyDisplaySelect) {
+    const mode = block.reply_display || "with_steps";
+    settingsFeishuReplyDisplaySelect.value = mode;
+    if (Array.isArray(block.reply_display_options)) {
+      settingsFeishuReplyDisplaySelect.innerHTML = block.reply_display_options
+        .map(
+          (opt) =>
+            `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label || opt.value)}</option>`
+        )
+        .join("");
+      settingsFeishuReplyDisplaySelect.value = mode;
+    }
+  }
+  if (settingsFeishuCardBackendSelect) {
+    const backend = block.card_backend || "cardkit";
+    if (Array.isArray(block.card_backend_options)) {
+      settingsFeishuCardBackendSelect.innerHTML = block.card_backend_options
+        .map(
+          (opt) =>
+            `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label || opt.value)}</option>`
+        )
+        .join("");
+    }
+    settingsFeishuCardBackendSelect.value = backend;
+  }
 
   const parts = [];
   if (block.app_secret_configured && block.app_secret_masked) {
@@ -2965,15 +2992,19 @@ function applyFeishuSettingsToForm(feishu) {
   }
 }
 
-/** 从设置表单收集飞书 PUT 载荷（仅包含有值的字段；全空则不下发）。 */
+/** 从设置表单收集飞书 PUT 载荷（凭证与展示模式；全空则不下发）。 */
 function buildFeishuSettingsPayload() {
   if (!settingsFeishuAppIdInput) return null;
   const appId = settingsFeishuAppIdInput.value.trim();
   const secret = settingsFeishuAppSecretInput?.value?.trim() || "";
-  if (!appId && !secret) return null;
+  const replyDisplay = settingsFeishuReplyDisplaySelect?.value?.trim() || "";
+  const cardBackend = settingsFeishuCardBackendSelect?.value?.trim() || "";
+  if (!appId && !secret && !replyDisplay && !cardBackend) return null;
   const feishu = {};
   if (appId) feishu.app_id = appId;
   if (secret) feishu.app_secret = secret;
+  if (replyDisplay) feishu.reply_display = replyDisplay;
+  if (cardBackend) feishu.card_backend = cardBackend;
   return feishu;
 }
 
@@ -3171,13 +3202,27 @@ function initSettings() {
   });
 }
 
-/** 初始化主题切换与持久化。 */
-function initTheme() {
+/** 将当前 UI 主题同步到后端（飞书卡片配色跟随）。 */
+async function syncUiThemeToServer(theme) {
+  const next = VALID_THEMES.includes(theme) ? theme : "dark";
+  try {
+    await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ui_theme: next }),
+    });
+  } catch {
+    /* 离线或未启动后端时忽略 */
+  }
+}
+
+/** 初始化主题切换与持久化（与后端 ui_theme 同步）。 */
+async function initTheme() {
   const root = document.documentElement;
   const buttons = document.querySelectorAll(".theme-btn[data-theme]");
   if (!buttons.length) return;
 
-  function apply(theme) {
+  function apply(theme, { syncServer = true } = {}) {
     const next = VALID_THEMES.includes(theme) ? theme : "dark";
     root.setAttribute("data-theme", next);
     try {
@@ -3190,10 +3235,22 @@ function initTheme() {
       btn.classList.toggle("active", on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
+    if (syncServer) syncUiThemeToServer(next);
   }
 
-  const saved = readStorageItem(THEME_STORAGE_KEY);
-  apply(saved || root.getAttribute("data-theme") || "dark");
+  let initial = readStorageItem(THEME_STORAGE_KEY) || root.getAttribute("data-theme") || "dark";
+  try {
+    const res = await fetch("/api/settings");
+    if (res.ok) {
+      const data = await res.json();
+      if (VALID_THEMES.includes(data.ui_theme)) {
+        initial = data.ui_theme;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  apply(initial, { syncServer: false });
 
   buttons.forEach((btn) => {
     btn.addEventListener("click", () => apply(btn.dataset.theme));
@@ -3410,7 +3467,7 @@ function initLayoutResize() {
   migrateLocalStorageKeys();
   loadOpenTabs();
   initContextMenuLock();
-  initTheme();
+  await initTheme();
   initSettings();
   initFilePanel();
   initFileTreeContextMenu();

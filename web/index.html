@@ -202,6 +202,19 @@
           spellcheck="false"
         />
         <p id="settings-feishu-hint" class="settings-hint"></p>
+        <label class="settings-label" for="settings-feishu-reply-display">最终消息展示</label>
+        <select id="settings-feishu-reply-display" class="settings-input">
+          <option value="with_steps">保留过程 + 回复</option>
+          <option value="reply_only">仅最终回复</option>
+        </select>
+        <p class="settings-hint settings-hint-muted">
+          写入 <code>data/feishu/config.json</code>；飞书卡片标题色跟随顶栏「深色/浅色」主题（存于 <code>user_settings.json</code>）。
+        </p>
+        <label class="settings-label" for="settings-feishu-card-backend">卡片后端</label>
+        <select id="settings-feishu-card-backend" class="settings-input">
+          <option value="cardkit">CardKit 实体（cardkit:card:write）</option>
+          <option value="classic">经典 interactive（im PATCH）</option>
+        </select>
         <div class="settings-actions settings-actions--inline">
           <button type="button" id="btn-settings-feishu-diagnose" class="btn secondary">检测连通</button>
           <button type="button" id="btn-settings-clear-feishu" class="btn secondary">清除飞书配置</button>

@@ -40,6 +40,8 @@ from backend.model_registry import (
     validate_model_id,
 )
 from backend.patch_apply import PatchError, apply_unique_replace
+from backend.channels.feishu.tool import configure_feishu_channel
+from backend.ui_theme_tool import set_app_ui_theme
 from backend.agent_steps import (
     clear_step_emitter,
     format_step_detail,
@@ -669,6 +671,8 @@ def _build_agent(model_id: str, thinking_enabled: bool, system_prompt: str):
             get_current_time,
             memory,
             search_past_chats,
+            configure_feishu_channel,
+            set_app_ui_theme,
         ],
         system_prompt=system_prompt,
     )
@@ -1034,10 +1038,12 @@ def chat_once(
     current_file: str | None = None,
     thinking_enabled: bool = False,
     channel: str | None = None,
+    on_step: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """
     非流式单轮对话（飞书等 IM 入口）：不注册 ConfirmRegistry，完成后持久化 chat_log。
 
+    on_step 可选：每产出一步 Agent 步骤时回调（供飞书等同条消息 PUT 更新）。
     返回 {"type":"done", "reply":...} 或 {"type":"error", "detail":...}。
     """
     user_text = user_message.strip()
@@ -1056,6 +1062,8 @@ def chat_once(
                 done = event
             elif event.get("type") == "error":
                 return event
+            elif on_step is not None and event.get("kind"):
+                on_step(event)
         if not done:
             return {"type": "error", "detail": "Agent 未返回结果"}
         persist_chat_turn(user_text, done)
