@@ -17,8 +17,17 @@ class WorkspaceError(ValueError):
     """路径非法或文件不存在等业务错误。"""
 
 
+def _workspace_root() -> Path:
+    """当前 Agent 的有效 workspace 根目录。"""
+    try:
+        from backend.agents.workspace import get_workspace_root
+
+        return get_workspace_root()
+    except Exception:
+        return WORKSPACE
+
+
 def _normalize_rel(relative_path: str) -> str:
-    """规范化相对路径：正斜杠、去首尾 /、禁止 .. 与空段。"""
     rel = relative_path.replace("\\", "/").strip()
     while "//" in rel:
         rel = rel.replace("//", "/")
@@ -32,10 +41,10 @@ def _normalize_rel(relative_path: str) -> str:
 
 
 def _resolve_safe(relative_path: str) -> Path:
-    """把相对路径解析为绝对 Path，并确认落在 WORKSPACE 根目录内。"""
+    """把相对路径解析为绝对 Path，并确认落在 workspace 根目录内。"""
     rel = _normalize_rel(relative_path)
-    target = (WORKSPACE / rel).resolve()
-    root = WORKSPACE.resolve()
+    root = _workspace_root().resolve()
+    target = (root / rel).resolve()
     if not str(target).startswith(str(root)):
         raise WorkspaceError("不允许访问工作区外的路径")
     return target
@@ -43,9 +52,10 @@ def _resolve_safe(relative_path: str) -> Path:
 
 def _ensure_workspace() -> Path:
     """确保 workspace 目录存在并返回其 Path。"""
-    if not WORKSPACE.exists():
-        WORKSPACE.mkdir(parents=True, exist_ok=True)
-    return WORKSPACE
+    root = _workspace_root()
+    if not root.exists():
+        root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
 
 
 def list_files() -> list[str]:
@@ -140,7 +150,7 @@ def delete_path(relative_path: str) -> str:
     """删除工作区内的文件或文件夹（目录递归删除）。返回被删路径。"""
     rel = _normalize_rel(relative_path)
     path = _resolve_safe(rel)
-    root = WORKSPACE.resolve()
+    root = _workspace_root().resolve()
     if path.resolve() == root:
         raise WorkspaceError("不能删除工作区根目录")
     if not path.exists():
@@ -152,11 +162,6 @@ def delete_path(relative_path: str) -> str:
     else:
         raise WorkspaceError(f"无法删除: {rel}")
     return rel
-
-
-def _workspace_root() -> Path:
-    """返回已 resolve 的工作区根目录。"""
-    return _ensure_workspace().resolve()
 
 
 def _path_under_workspace(target: Path) -> str:

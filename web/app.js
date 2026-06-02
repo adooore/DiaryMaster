@@ -64,6 +64,31 @@ const LAYOUT_STORAGE_KEY = "diarymaster-layout-v1";
 const TABS_STORAGE_KEY = "diarymaster-open-tabs";
 const HISTORY_OPEN_STORAGE_KEY = "diarymaster-history-open";
 const THEME_STORAGE_KEY = "diarymaster-theme";
+const AGENT_STORAGE_KEY = "diarymaster-active-agent-id";
+const agentPickerEl = document.getElementById("agent-picker");
+const agentPickerTrigger = document.getElementById("agent-picker-trigger");
+const agentPickerLabel = document.getElementById("agent-picker-label");
+const agentPickerMenu = document.getElementById("agent-picker-menu");
+const settingsPanelEl = document.getElementById("settings-panel");
+const settingsAgentListEl = document.getElementById("settings-agent-list");
+const settingsAgentEmptyEl = document.getElementById("settings-agent-empty");
+const settingsAgentEditorEl = document.getElementById("settings-agent-editor");
+const settingsAgentCountEl = document.getElementById("settings-agent-count");
+const settingsAgentIdHint = document.getElementById("settings-agent-id-hint");
+const settingsAgentNameInput = document.getElementById("settings-agent-name");
+const settingsAgentRoleInput = document.getElementById("settings-agent-role");
+const settingsAgentWorkspaceModeSelect = document.getElementById("settings-agent-workspace-mode");
+const settingsAgentWorkspaceRefInput = document.getElementById("settings-agent-workspace-ref");
+const settingsAgentApiKeyInput = document.getElementById("settings-agent-api-key");
+const settingsAgentApiKeyHint = document.getElementById("settings-agent-api-key-hint");
+const btnAgentNew = document.getElementById("btn-agent-new");
+const btnAgentSave = document.getElementById("btn-agent-save");
+const btnAgentDelete = document.getElementById("btn-agent-delete");
+const btnAgentSwitch = document.getElementById("btn-agent-switch");
+const btnAgentCancel = document.getElementById("btn-agent-cancel");
+const settingsAgentWorkspaceRefWrap = document.getElementById("settings-agent-workspace-ref-wrap");
+const settingsTabButtons = document.querySelectorAll("[data-settings-tab]");
+const settingsTabPanels = document.querySelectorAll("[data-settings-panel]");
 
 /** 将旧版 localStorage 键一次性迁移到 diarymaster-*（若存在） */
 function migrateLocalStorageKeys() {
@@ -96,6 +121,13 @@ function readStorageItem(key) {
 
 let modelsCatalog = [];
 let defaultModelId = "deepseek-v4-flash";
+/** @type {Array<object>} */
+let agentsCatalog = [];
+let activeAgentId = "default";
+/** @type {string | null} */
+let editingAgentId = null;
+/** Agent 面板模式：empty 占位 | create 新建 | edit 编辑已有。 */
+let agentPanelMode = "empty";
 
 let currentFile = null;
 let viewMode = "edit";
@@ -111,6 +143,10 @@ let selectedChangeId = null;
 let chatLog = [];
 /** @type {Array<object>} */
 let sessionsList = [];
+let sessionUpdatedAt = "";
+/** @type {ReturnType<typeof setInterval> | null} */
+let sessionSyncTimer = null;
+let localChatStreamDepth = 0;
 /** @type {string[]} */
 let openTabIds = [];
 let historyPanelOpen = false;
@@ -595,7 +631,7 @@ function isStepsFlowComplete(steps) {
 
 /** 完成后默认折叠；进行中始终展开 */
 function resolveStepsCollapsed(item) {
-  if (item._pending) return false;
+  if (isAssistantInProgress(item)) return false;
   const steps = item.steps || [];
   const { main } = partitionSteps(steps);
   if (!main.length || !isStepsFlowComplete(steps)) return false;
@@ -709,6 +745,16 @@ function buildAgentStepsElement(
   return wrap;
 }
 
+/** 判断 assistant 消息是否仍在进行中（本页 SSE 或 IM 渠道 live）。 */
+function isAssistantInProgress(item) {
+  return Boolean(item && item.role === "assistant" && (item._pending || item.live));
+}
+
+/** 本页是否正在消费 SSE 聊天流（避免轮询覆盖本地占位）。 */
+function isLocalChatStreamActive() {
+  return localChatStreamDepth > 0;
+}
+
 /** 查找进行中的 assistant 占位消息。 */
 function findPendingAssistant(pendingId) {
   return chatLog.find((m) => m._pending === pendingId);
@@ -744,19 +790,21 @@ function finalizePendingAssistant(pendingId, { text, steps, reasoning, usage }) 
 function appendMessageElement(parent, item) {
   const div = document.createElement("div");
   div.className = `msg ${item.role}`;
-  if (item._pending) div.classList.add("pending");
+  if (isAssistantInProgress(item)) div.classList.add("pending");
 
   const hasSteps =
     item.role === "assistant" &&
-    (item.steps?.length || item.reasoning || item._pending);
+    (item.steps?.length || item.reasoning || isAssistantInProgress(item));
   if (hasSteps) {
     const steps = effectiveAssistantSteps(item);
     const collapsed = resolveStepsCollapsed(item);
     const canToggle =
-      !item._pending && isStepsFlowComplete(steps) && partitionSteps(steps).main.length > 0;
+      !isAssistantInProgress(item) &&
+      isStepsFlowComplete(steps) &&
+      partitionSteps(steps).main.length > 0;
     div.appendChild(
       buildAgentStepsElement(steps, {
-        active: Boolean(item._pending),
+        active: isAssistantInProgress(item),
         collapsed,
         onToggle: canToggle
           ? () => {
@@ -770,7 +818,9 @@ function appendMessageElement(parent, item) {
     textEl.className = "msg-text";
     const bodyText =
       item.text ||
-      (item._pending && !(item.steps && item.steps.length) ? "等待 Agent…" : "");
+      (isAssistantInProgress(item) && !(item.steps && item.steps.length)
+        ? "等待 Agent…"
+        : "");
     if (bodyText) {
       setMessageBody(textEl, bodyText, item.role);
       div.appendChild(textEl);
@@ -870,7 +920,7 @@ function renderChat() {
     const header = document.createElement("div");
     header.className = "chat-turn-header";
 
-    const hasPending = block.messages.some((m) => m._pending);
+    const hasPending = block.messages.some((m) => isAssistantInProgress(m));
     const label = document.createElement("span");
     label.className = "chat-turn-label";
     label.textContent = hasPending ? `第 ${block.turn} 轮 · 进行中` : `第 ${block.turn} 轮`;
@@ -1089,7 +1139,7 @@ function formatUsageCallLine(call, { isPeak = false } = {}) {
 
 /** 构造 assistant 消息底部的 token 用量条（含分次明细）。 */
 function buildMessageUsageFooter(item) {
-  if (item.role !== "assistant" || item._pending) return null;
+  if (item.role !== "assistant" || isAssistantInProgress(item)) return null;
   const summary = summarizeTurnUsage(item.usage);
   if (!summary) return null;
 
@@ -1817,8 +1867,18 @@ function syncDiffWithSession() {
 function applySessionPayload(data) {
   sessionId = data.id || data.session_id;
   sessionTurn = Number(data.turn) || 0;
+  sessionUpdatedAt = data.updated_at || sessionUpdatedAt || "";
   sessionChanges = data.changes || [];
   if (Array.isArray(data.chat_log)) {
+    if (isLocalChatStreamActive() || chatLog.some((m) => m._pending)) {
+      if (data.sessions) {
+        applySessionsList(data.sessions, data.active_id || sessionId);
+      } else {
+        syncSessionsUI();
+      }
+      refreshContextUsage();
+      return;
+    }
     chatLog = data.chat_log;
     sessionTurn = Math.max(sessionTurn, maxTurnFromChatLog(chatLog));
     renderChat();
@@ -1833,6 +1893,49 @@ function applySessionPayload(data) {
     syncSessionsUI();
   }
   refreshContextUsage();
+}
+
+/** 合并远端 chat_log（飞书等 IM 触发的增量同步，不切换 Session）。 */
+function mergeRemoteChatLog(remoteLog) {
+  if (isLocalChatStreamActive() || chatLog.some((m) => m._pending)) return;
+  chatLog = remoteLog;
+  sessionTurn = Math.max(sessionTurn, maxTurnFromChatLog(chatLog));
+  renderChat();
+}
+
+/** 轮询当前 Session，同步 IM 渠道进行中的步骤。 */
+async function pollSessionSync() {
+  if (!sessionId || isLocalChatStreamActive()) return;
+  const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/sync`);
+  if (!res.ok) return;
+  const data = await res.json();
+  const remoteUpdated = data.updated_at || "";
+  if (remoteUpdated && remoteUpdated === sessionUpdatedAt) return;
+  sessionUpdatedAt = remoteUpdated;
+  if (Array.isArray(data.chat_log)) {
+    mergeRemoteChatLog(data.chat_log);
+  }
+  if (typeof data.turn === "number") {
+    sessionTurn = Math.max(sessionTurn, data.turn);
+  }
+}
+
+/** 启动 Session 轮询（标签页可见时每 ~1.2s 同步一次）。 */
+function startSessionSyncPolling() {
+  if (sessionSyncTimer) return;
+  sessionSyncTimer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    pollSessionSync();
+  }, 1200);
+}
+
+/** 进入页面时立即拉一次并开启轮询。 */
+function initSessionSync() {
+  startSessionSyncPolling();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") pollSessionSync();
+  });
+  pollSessionSync();
 }
 
 /** 加载当前激活 Session。 */
@@ -2699,57 +2802,62 @@ function showInlineToolConfirm(pendingId, event) {
 
 /** 消费 SSE 聊天流并更新 UI。 */
 async function consumeChatStream(response, pendingId, pendingTurn) {
+  localChatStreamDepth += 1;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let donePayload = null;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-    for (const part of parts) {
-      const line = part
-        .split("\n")
-        .find((l) => l.startsWith("data:"));
-      if (!line) continue;
-      const jsonText = line.slice(5).trim();
-      if (!jsonText) continue;
-      let event;
-      try {
-        event = JSON.parse(jsonText);
-      } catch {
-        continue;
-      }
-      if (event.type === "step") {
-        upsertAgentStep(pendingId, event);
-      } else if (event.type === "confirm") {
-        const approved = await showInlineToolConfirm(pendingId, event);
-        await submitToolConfirm(event.confirm_id, approved);
-      } else if (event.type === "error") {
-        throw new Error(event.detail || "Agent 错误");
-      } else if (event.type === "session_title") {
-        if (event.sessions) {
-          applySessionsList(event.sessions, event.active_id || sessionId);
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const part of parts) {
+        const line = part
+          .split("\n")
+          .find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        const jsonText = line.slice(5).trim();
+        if (!jsonText) continue;
+        let event;
+        try {
+          event = JSON.parse(jsonText);
+        } catch {
+          continue;
         }
-      } else if (event.type === "done") {
-        donePayload = event;
-        finalizePendingAssistant(pendingId, {
-          text: event.reply,
-          steps: event.steps,
-          reasoning: event.reasoning,
-          usage: event.usage,
-        });
-        if (event.usage) applyContextUsageFromDone(event.usage);
-        if (event.session_title && event.sessions) {
-          applySessionsList(event.sessions, event.active_id || sessionId);
+        if (event.type === "step") {
+          upsertAgentStep(pendingId, event);
+        } else if (event.type === "confirm") {
+          const approved = await showInlineToolConfirm(pendingId, event);
+          await submitToolConfirm(event.confirm_id, approved);
+        } else if (event.type === "error") {
+          throw new Error(event.detail || "Agent 错误");
+        } else if (event.type === "session_title") {
+          if (event.sessions) {
+            applySessionsList(event.sessions, event.active_id || sessionId);
+          }
+        } else if (event.type === "done") {
+          donePayload = event;
+          finalizePendingAssistant(pendingId, {
+            text: event.reply,
+            steps: event.steps,
+            reasoning: event.reasoning,
+            usage: event.usage,
+          });
+          if (event.usage) applyContextUsageFromDone(event.usage);
+          if (event.session_title && event.sessions) {
+            applySessionsList(event.sessions, event.active_id || sessionId);
+          }
         }
       }
     }
+    return donePayload;
+  } finally {
+    localChatStreamDepth = Math.max(0, localChatStreamDepth - 1);
   }
-  return donePayload;
 }
 
 /** 一轮对话结束后刷新会话与文件状态。 */
@@ -2856,6 +2964,423 @@ btnNewSession.addEventListener("click", async () => {
   await newSession();
 });
 
+/** 加载 Agent 列表并刷新顶栏选择器。 */
+async function loadAgentsCatalog() {
+  const res = await fetch("/api/agents");
+  if (!res.ok) return;
+  const data = await res.json();
+  agentsCatalog = data.agents || [];
+  activeAgentId = data.active_agent_id || activeAgentId || "default";
+  try {
+    localStorage.setItem(AGENT_STORAGE_KEY, activeAgentId);
+  } catch {
+    /* ignore */
+  }
+  renderAgentPicker();
+  renderAgentSettingsList();
+  syncAgentSwitchButton();
+}
+
+/** 渲染顶栏 Agent 下拉。 */
+function renderAgentPicker() {
+  if (!agentPickerMenu || !agentPickerLabel) return;
+  const current = agentsCatalog.find((a) => a.agent_id === activeAgentId);
+  agentPickerLabel.textContent = current?.display_name || activeAgentId || "—";
+  agentPickerMenu.innerHTML = "";
+  for (const agent of agentsCatalog) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "agent-picker-option";
+    btn.setAttribute("role", "option");
+    btn.dataset.id = agent.agent_id;
+    btn.textContent = agent.display_name || agent.agent_id;
+    btn.setAttribute("aria-selected", agent.agent_id === activeAgentId ? "true" : "false");
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setAgentPickerOpen(false);
+      switchAgent(agent.agent_id);
+    });
+    li.appendChild(btn);
+    agentPickerMenu.appendChild(li);
+  }
+}
+
+/** 打开或关闭 Agent 下拉。 */
+function setAgentPickerOpen(open) {
+  if (!agentPickerEl || !agentPickerTrigger || !agentPickerMenu) return;
+  const isOpen = Boolean(open);
+  if (isOpen) hideAppTooltip();
+  agentPickerEl.classList.toggle("is-open", isOpen);
+  agentPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  agentPickerMenu.classList.toggle("hidden", !isOpen);
+}
+
+/** 切换 Agent 并 reload Session / 文件树 / 记忆。 */
+async function switchAgent(agentId) {
+  if (!agentId || agentId === activeAgentId) return;
+  const res = await fetch("/api/agents/active", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert("切换 Agent 失败: " + (data.detail || res.statusText));
+    return false;
+  }
+  activeAgentId = data.active_agent_id || agentId;
+  agentsCatalog = data.agents || agentsCatalog;
+  try {
+    localStorage.setItem(AGENT_STORAGE_KEY, activeAgentId);
+  } catch {
+    /* ignore */
+  }
+  currentFile = null;
+  openTabIds = [];
+  saveOpenTabs();
+  clearDiff();
+  if (editorEl) editorEl.value = "";
+  if (currentFileLabel) currentFileLabel.textContent = "未打开文件";
+  renderAgentPicker();
+  renderAgentSettingsList();
+  await loadSession();
+  await loadFileTree();
+  await loadMemoriesIntoForm();
+  return true;
+}
+
+/** 设置页左侧选中 Agent：先切换再打开编辑区。 */
+async function selectAgentInSettings(agentId) {
+  if (!agentId) return;
+  if (agentId !== activeAgentId) {
+    const ok = await switchAgent(agentId);
+    if (!ok) return;
+  }
+  await showAgentEditor(agentId);
+}
+
+/** 同步 Agent 管理区 empty / 编辑区可见性与样式。 */
+function syncAgentPanelView() {
+  const isCreate = agentPanelMode === "create";
+  const isEdit = agentPanelMode === "edit" && Boolean(editingAgentId);
+  const showWorkspace = isCreate || isEdit;
+
+  settingsAgentEmptyEl?.classList.toggle("hidden", showWorkspace);
+  settingsAgentEditorEl?.classList.toggle("hidden", !showWorkspace);
+  settingsAgentEditorEl?.classList.toggle("is-create", isCreate);
+  settingsAgentEditorEl?.classList.toggle("is-edit", isEdit);
+  btnAgentNew?.classList.toggle("is-active", isCreate);
+  if (btnAgentSave) {
+    btnAgentSave.textContent = isCreate ? "创建" : "保存";
+  }
+  syncAgentSwitchButton();
+}
+
+/** 设置页「切换到此」按钮：编辑非当前 Agent 时显示。 */
+function syncAgentSwitchButton() {
+  if (!btnAgentSwitch) return;
+  const show =
+    agentPanelMode === "edit" &&
+    Boolean(editingAgentId) &&
+    editingAgentId !== activeAgentId;
+  btnAgentSwitch.classList.toggle("hidden", !show);
+}
+
+/** 进入 Agent 占位页（未选中任何 Agent）。 */
+function showAgentEmptyState() {
+  agentPanelMode = "empty";
+  editingAgentId = null;
+  syncAgentPanelView();
+  renderAgentSettingsList();
+}
+
+/** 渲染设置页 Agent 列表。 */
+function renderAgentSettingsList() {
+  if (!settingsAgentListEl) return;
+  if (settingsAgentCountEl) {
+    settingsAgentCountEl.textContent = String(agentsCatalog.length);
+  }
+  settingsAgentListEl.innerHTML = "";
+  if (!agentsCatalog.length) {
+    const empty = document.createElement("li");
+    empty.className = "settings-agent-list-empty";
+    empty.textContent = "暂无 Agent";
+    settingsAgentListEl.appendChild(empty);
+    return;
+  }
+  for (const agent of agentsCatalog) {
+    const li = document.createElement("li");
+    const isSelected = agentPanelMode === "edit" && agent.agent_id === editingAgentId;
+    li.className =
+      "settings-agent-card" +
+      (agent.agent_id === activeAgentId ? " is-active" : "") +
+      (isSelected ? " is-selected" : "");
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", isSelected ? "true" : "false");
+    li.tabIndex = 0;
+    li.addEventListener("click", () => selectAgentInSettings(agent.agent_id));
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectAgentInSettings(agent.agent_id);
+      }
+    });
+    const body = document.createElement("div");
+    body.className = "settings-agent-card__body";
+    const name = document.createElement("div");
+    name.className = "settings-agent-card__name";
+    name.textContent = agent.display_name || agent.agent_id;
+    body.appendChild(name);
+    li.appendChild(body);
+    settingsAgentListEl.appendChild(li);
+  }
+  syncAgentSwitchButton();
+}
+
+/** 根据工作区模式显示/隐藏共用目标字段。 */
+function syncAgentWorkspaceRefVisibility() {
+  if (!settingsAgentWorkspaceRefWrap || !settingsAgentWorkspaceModeSelect) return;
+  const shared = settingsAgentWorkspaceModeSelect.value === "shared";
+  settingsAgentWorkspaceRefWrap.hidden = !shared;
+}
+
+/** 打开 Agent 新建或编辑工作区。 */
+async function showAgentEditor(agentId) {
+  if (!settingsAgentEditorEl) return;
+  if (agentId) {
+    agentPanelMode = "edit";
+    editingAgentId = agentId;
+  } else {
+    agentPanelMode = "create";
+    editingAgentId = null;
+  }
+  syncAgentPanelView();
+  renderAgentSettingsList();
+
+  const isCreate = agentPanelMode === "create";
+  if (settingsAgentIdHint) {
+    settingsAgentIdHint.textContent = isCreate ? "" : agentId || "";
+  }
+  if (settingsFeishuDiagnostics) {
+    settingsFeishuDiagnostics.classList.add("hidden");
+    settingsFeishuDiagnostics.innerHTML = "";
+  }
+  if (agentId) {
+    const agent = agentsCatalog.find((a) => a.agent_id === agentId);
+    if (settingsAgentNameInput) settingsAgentNameInput.value = agent?.display_name || "";
+    if (settingsAgentRoleInput) settingsAgentRoleInput.value = agent?.role_prompt || "";
+    if (settingsAgentWorkspaceModeSelect) {
+      settingsAgentWorkspaceModeSelect.value = agent?.workspace_mode || "dedicated";
+    }
+    if (settingsAgentWorkspaceRefInput) {
+      settingsAgentWorkspaceRefInput.value = agent?.shared_workspace_ref || "legacy";
+    }
+    if (settingsAgentApiKeyInput) settingsAgentApiKeyInput.value = "";
+    if (settingsAgentApiKeyHint) {
+      settingsAgentApiKeyHint.textContent = agent?.api_key_configured ? agent.api_key_masked : "";
+      settingsAgentApiKeyHint.className = agent?.api_key_configured
+        ? "settings-hint ok settings-hint-compact"
+        : "settings-hint settings-hint-compact";
+    }
+    if (btnAgentDelete) btnAgentDelete.classList.toggle("hidden", agentId === "default");
+    try {
+      const [detailRes, memRes] = await Promise.all([
+        fetch(`/api/agents/${encodeURIComponent(agentId)}`),
+        fetch(`/api/agents/${encodeURIComponent(agentId)}/memories`),
+      ]);
+      if (detailRes.ok) {
+        const detail = await detailRes.json();
+        applyFeishuSettingsToForm(detail);
+      } else {
+        applyFeishuSettingsToForm(agent);
+      }
+      if (memRes.ok) {
+        const memData = await memRes.json();
+        applyMemoriesToForm(memData);
+      }
+    } catch {
+      applyFeishuSettingsToForm(agent);
+    }
+  } else {
+    if (settingsAgentNameInput) settingsAgentNameInput.value = "";
+    if (settingsAgentRoleInput) settingsAgentRoleInput.value = "";
+    if (settingsAgentWorkspaceModeSelect) settingsAgentWorkspaceModeSelect.value = "dedicated";
+    if (settingsAgentWorkspaceRefInput) settingsAgentWorkspaceRefInput.value = "legacy";
+    if (settingsAgentApiKeyInput) settingsAgentApiKeyInput.value = "";
+    if (settingsAgentApiKeyHint) settingsAgentApiKeyHint.textContent = "";
+    if (settingsAgentIdHint) settingsAgentIdHint.textContent = "";
+    if (btnAgentDelete) btnAgentDelete.classList.add("hidden");
+    applyFeishuSettingsToForm(null);
+    applyMemoriesToForm(null);
+  }
+  syncAgentWorkspaceRefVisibility();
+}
+
+/** 取消编辑：回到当前对话 Agent 或占位页。 */
+function cancelAgentEditor() {
+  if (agentPanelMode === "create" && activeAgentId) {
+    showAgentEditor(activeAgentId);
+    return;
+  }
+  if (editingAgentId && activeAgentId && editingAgentId !== activeAgentId) {
+    showAgentEditor(activeAgentId);
+    return;
+  }
+  showAgentEmptyState();
+}
+
+/** 保存 Agent 新建或编辑。 */
+async function saveAgentFromEditor() {
+  const name = settingsAgentNameInput?.value?.trim();
+  if (!name) {
+    alert("请填写 Agent 名称");
+    return;
+  }
+  const body = {
+    display_name: name,
+    role_prompt: settingsAgentRoleInput?.value || "",
+    workspace_mode: settingsAgentWorkspaceModeSelect?.value || "dedicated",
+    shared_workspace_ref: settingsAgentWorkspaceRefInput?.value?.trim() || null,
+  };
+  const key = settingsAgentApiKeyInput?.value?.trim();
+  if (key) body.api_key = key;
+
+  const feishuId = settingsFeishuAppIdInput?.value?.trim() || "";
+  const feishuSecret = settingsFeishuAppSecretInput?.value?.trim() || "";
+  const replyDisplay = settingsFeishuReplyDisplaySelect?.value?.trim() || "";
+  const cardBackend = settingsFeishuCardBackendSelect?.value?.trim() || "";
+  if (feishuId) body.feishu_app_id = feishuId;
+  if (feishuSecret) body.feishu_app_secret = feishuSecret;
+  if (replyDisplay) body.feishu_reply_display = replyDisplay;
+  if (cardBackend) body.feishu_card_backend = cardBackend;
+
+  let res;
+  let savedAgentId = editingAgentId;
+  if (editingAgentId) {
+    res = await fetch(`/api/agents/${encodeURIComponent(editingAgentId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } else {
+    res = await fetch("/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert("保存 Agent 失败: " + (data.detail || res.statusText));
+    return;
+  }
+  savedAgentId = data.agent?.agent_id || editingAgentId || savedAgentId;
+  if (savedAgentId && settingsMemoryUserInput && settingsMemoryMemoryInput) {
+    const memRes = await fetch(`/api/agents/${encodeURIComponent(savedAgentId)}/memories`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user: settingsMemoryUserInput.value,
+        memory: settingsMemoryMemoryInput.value,
+      }),
+    });
+    const memData = await memRes.json().catch(() => ({}));
+    if (!memRes.ok) {
+      alert("Agent 已保存，但记忆保存失败: " + (memData.detail || memRes.statusText));
+    } else {
+      applyMemoriesToForm(memData);
+    }
+  }
+  agentsCatalog = data.agents || agentsCatalog;
+  activeAgentId = data.active_agent_id || activeAgentId;
+  if (savedAgentId) {
+    await showAgentEditor(savedAgentId);
+  }
+  renderAgentPicker();
+  renderAgentSettingsList();
+  if (savedAgentId === activeAgentId) {
+    await loadMemoriesIntoForm();
+  }
+  if (feishuId || feishuSecret || data.agent?.feishu_configured) {
+    await restartFeishuWs();
+  }
+}
+
+/** 删除当前编辑中的 Agent。 */
+async function deleteAgentFromEditor() {
+  if (!editingAgentId || editingAgentId === "default") return;
+  if (!confirm(`确定删除 Agent「${editingAgentId}」？其 Session 与记忆将一并删除。`)) return;
+  const res = await fetch(`/api/agents/${encodeURIComponent(editingAgentId)}`, {
+    method: "DELETE",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert("删除失败: " + (data.detail || res.statusText));
+    return;
+  }
+  agentsCatalog = data.agents || agentsCatalog;
+  activeAgentId = data.active_agent_id || "default";
+  if (agentsCatalog.length) {
+    await showAgentEditor(activeAgentId);
+  } else {
+    showAgentEmptyState();
+  }
+  currentFile = null;
+  openTabIds = [];
+  clearDiff();
+  renderAgentPicker();
+  renderAgentSettingsList();
+  await loadSession();
+  await loadFileTree();
+  await loadMemoriesIntoForm();
+}
+
+/** 绑定 Agent 顶栏与设置页事件。 */
+function initAgentManagement() {
+  agentPickerTrigger?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setAgentPickerOpen(!agentPickerEl?.classList.contains("is-open"));
+  });
+  document.addEventListener("click", (e) => {
+    if (!agentPickerEl?.contains(e.target)) setAgentPickerOpen(false);
+  });
+  btnAgentNew?.addEventListener("click", () => showAgentEditor(null));
+  btnAgentSave?.addEventListener("click", () => saveAgentFromEditor());
+  btnAgentSwitch?.addEventListener("click", async () => {
+    if (!editingAgentId || editingAgentId === activeAgentId) return;
+    const ok = await switchAgent(editingAgentId);
+    if (ok) await showAgentEditor(editingAgentId);
+  });
+  btnAgentDelete?.addEventListener("click", () => deleteAgentFromEditor());
+  btnAgentCancel?.addEventListener("click", () => cancelAgentEditor());
+  settingsAgentWorkspaceModeSelect?.addEventListener("change", syncAgentWorkspaceRefVisibility);
+}
+
+/** 切换设置页 Tab。 */
+function setSettingsTab(tabId) {
+  const id = tabId || "agents";
+  settingsTabButtons.forEach((btn) => {
+    const on = btn.dataset.settingsTab === id;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  settingsTabPanels.forEach((panel) => {
+    const on = panel.dataset.settingsPanel === id;
+    panel.classList.toggle("is-active", on);
+    panel.hidden = !on;
+  });
+  settingsPanelEl?.classList.toggle("settings-panel--wide", id === "agents");
+  settingsForm?.classList.toggle("settings-form--agents", id === "agents");
+}
+
+/** 绑定设置页 Tab 切换。 */
+function initSettingsTabs() {
+  settingsTabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => setSettingsTab(btn.dataset.settingsTab));
+  });
+}
+
 const VALID_THEMES = ["dark", "blossom"];
 
 /** 打开或关闭设置弹层。 */
@@ -2866,17 +3391,28 @@ function setSettingsOpen(open) {
   settingsOverlay.setAttribute("aria-hidden", on ? "false" : "true");
   if (on) {
     hideAppTooltip();
+    setSettingsTab("agents");
+    loadAgentsCatalog().then(() => {
+      if (agentsCatalog.length && activeAgentId) {
+        showAgentEditor(activeAgentId);
+      } else {
+        showAgentEmptyState();
+      }
+    });
     loadSettingsIntoForm();
-    settingsApiKeyInput?.focus();
   }
 }
 
 /** 更新记忆占用提示（本地字数或 API 返回的 usage）。 */
 function updateMemoryUsageHint(el, used, limit, percent) {
   if (!el) return;
-  const warn = percent >= 80;
-  el.textContent = `${used} / ${limit} 字符（${percent}%）`;
-  el.className = warn ? "settings-hint settings-usage-hint warn" : "settings-hint settings-usage-hint";
+  if (percent < 80) {
+    el.textContent = "";
+    el.className = "settings-usage-inline";
+    return;
+  }
+  el.textContent = `${percent}% 已用（${used}/${limit}）`;
+  el.className = "settings-usage-inline warn";
 }
 
 /** 绑定记忆文本框输入时的占用提示。 */
@@ -2895,71 +3431,68 @@ function bindMemoryUsageLive() {
   }
 }
 
-/** 加载长期记忆到设置表单。 */
-async function loadMemoriesIntoForm() {
+/** 将记忆 API 响应填入 Agent 编辑区。 */
+function applyMemoriesToForm(data) {
   if (!settingsMemoryUserInput || !settingsMemoryMemoryInput) return;
-  try {
-    const res = await fetch("/api/memories");
-    if (!res.ok) throw new Error(res.statusText);
-    const data = await res.json();
-    settingsMemoryUserInput.value = data.user?.content ?? "";
-    settingsMemoryMemoryInput.value = data.memory?.content ?? "";
-    const u = data.user?.usage;
-    const m = data.memory?.usage;
-    if (u) updateMemoryUsageHint(settingsMemoryUserUsage, u.used, u.limit, u.percent);
-    if (m) updateMemoryUsageHint(settingsMemoryMemoryUsage, m.used, m.limit, m.percent);
-  } catch {
-    if (settingsMemoryUserUsage) {
-      settingsMemoryUserUsage.textContent = "无法读取记忆文件";
-      settingsMemoryUserUsage.className = "settings-hint settings-usage-hint warn";
-    }
+  if (!data) {
+    settingsMemoryUserInput.value = "";
+    settingsMemoryMemoryInput.value = "";
+    if (settingsMemoryUserUsage) settingsMemoryUserUsage.textContent = "";
+    if (settingsMemoryMemoryUsage) settingsMemoryMemoryUsage.textContent = "";
+    return;
   }
-}
-
-/** 保存 USER / MEMORY 全文到后端。 */
-async function saveMemoriesFromForm() {
-  if (!settingsMemoryUserInput || !settingsMemoryMemoryInput) return;
-  const res = await fetch("/api/memories", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      user: settingsMemoryUserInput.value,
-      memory: settingsMemoryMemoryInput.value,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.detail || res.statusText || "保存记忆失败");
-  }
+  settingsMemoryUserInput.value = data.user?.content ?? "";
+  settingsMemoryMemoryInput.value = data.memory?.content ?? "";
   const u = data.user?.usage;
   const m = data.memory?.usage;
   if (u) updateMemoryUsageHint(settingsMemoryUserUsage, u.used, u.limit, u.percent);
   if (m) updateMemoryUsageHint(settingsMemoryMemoryUsage, m.used, m.limit, m.percent);
 }
 
-/** 将飞书配置状态填入设置表单（密钥输入框留空表示不修改）。 */
-function applyFeishuSettingsToForm(feishu) {
+/** 加载当前 active Agent 记忆（对话区切换后刷新用）。 */
+async function loadMemoriesIntoForm() {
+  if (!settingsMemoryUserInput || !settingsMemoryMemoryInput) return;
+  try {
+    const res = await fetch("/api/memories");
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    applyMemoriesToForm(data);
+  } catch {
+    if (settingsMemoryUserUsage) {
+      settingsMemoryUserUsage.textContent = "无法读取";
+      settingsMemoryUserUsage.className = "settings-usage-inline warn";
+    }
+  }
+}
+
+/** 将飞书配置状态填入 Agent 编辑表单（密钥输入框留空表示不修改）。 */
+function applyFeishuSettingsToForm(detail) {
   if (!settingsFeishuAppIdInput || !settingsFeishuHint) return;
-  const block = feishu || {};
-  settingsFeishuAppIdInput.value = block.app_id || "";
+  const block = detail || {};
+  const channel = block.feishu_channel || {};
+  const appId = block.feishu_app_id || "";
+  const configured = Boolean(block.feishu_configured);
+  const secretConfigured = Boolean(block.feishu_app_secret_configured);
+  const secretMasked = block.feishu_app_secret_masked || "";
+
+  settingsFeishuAppIdInput.value = appId;
   if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
   if (settingsFeishuReplyDisplaySelect) {
-    const mode = block.reply_display || "with_steps";
-    settingsFeishuReplyDisplaySelect.value = mode;
-    if (Array.isArray(block.reply_display_options)) {
-      settingsFeishuReplyDisplaySelect.innerHTML = block.reply_display_options
+    const mode = channel.reply_display || "with_steps";
+    if (Array.isArray(channel.reply_display_options)) {
+      settingsFeishuReplyDisplaySelect.innerHTML = channel.reply_display_options
         .map(
           (opt) =>
             `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label || opt.value)}</option>`
         )
         .join("");
-      settingsFeishuReplyDisplaySelect.value = mode;
     }
+    settingsFeishuReplyDisplaySelect.value = mode;
   }
   if (settingsFeishuCardBackendSelect) {
-    const backend = block.card_backend || "cardkit";
-    if (Array.isArray(block.card_backend_options)) {
-      settingsFeishuCardBackendSelect.innerHTML = block.card_backend_options
+    const backend = channel.card_backend || "cardkit";
+    if (Array.isArray(channel.card_backend_options)) {
+      settingsFeishuCardBackendSelect.innerHTML = channel.card_backend_options
         .map(
           (opt) =>
             `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label || opt.value)}</option>`
@@ -2969,43 +3502,34 @@ function applyFeishuSettingsToForm(feishu) {
     settingsFeishuCardBackendSelect.value = backend;
   }
 
-  const parts = [];
-  if (block.app_secret_configured && block.app_secret_masked) {
-    parts.push(`Secret ${block.app_secret_masked}`);
-  }
-  if (block.enabled) {
-    settingsFeishuHint.textContent =
-      parts.length > 0
-        ? `已配置：${parts.join("；")}（Secret 留空并保存则不会修改）`
-        : "飞书 App ID / Secret 已齐全，可启用 webhook。";
-    settingsFeishuHint.className = "settings-hint ok";
-    if (settingsFeishuAppSecretInput) {
-      settingsFeishuAppSecretInput.placeholder = "留空不修改…";
-    }
-  } else if (block.app_id) {
-    settingsFeishuHint.textContent = "已填写 App ID，请补全 App Secret 后保存。";
-    settingsFeishuHint.className = "settings-hint warn";
+  if (configured) {
+    settingsFeishuHint.textContent = secretConfigured && secretMasked ? `已配置 · ${secretMasked}` : "已配置";
+    settingsFeishuHint.className = "settings-hint ok settings-hint-compact";
+    if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.placeholder = "留空不修改";
+  } else if (appId) {
+    settingsFeishuHint.textContent = "请补全 Secret";
+    settingsFeishuHint.className = "settings-hint warn settings-hint-compact";
   } else {
-    settingsFeishuHint.textContent = "尚未配置飞书机器人（需 App ID 与 App Secret）。";
-    settingsFeishuHint.className = "settings-hint warn";
+    settingsFeishuHint.textContent = "未配置";
+    settingsFeishuHint.className = "settings-hint settings-hint-compact";
     if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.placeholder = "";
   }
 }
 
-/** 从设置表单收集飞书 PUT 载荷（凭证与展示模式；全空则不下发）。 */
-function buildFeishuSettingsPayload() {
-  if (!settingsFeishuAppIdInput) return null;
-  const appId = settingsFeishuAppIdInput.value.trim();
+/** 收集飞书检测请求体（含 agent_id 与未保存凭证）。 */
+function buildFeishuDiagnosticsPayload() {
+  const agentId =
+    agentPanelMode === "edit"
+      ? editingAgentId
+      : agentPanelMode === "create"
+        ? activeAgentId || "default"
+        : activeAgentId || "default";
+  const appId = settingsFeishuAppIdInput?.value?.trim() || "";
   const secret = settingsFeishuAppSecretInput?.value?.trim() || "";
-  const replyDisplay = settingsFeishuReplyDisplaySelect?.value?.trim() || "";
-  const cardBackend = settingsFeishuCardBackendSelect?.value?.trim() || "";
-  if (!appId && !secret && !replyDisplay && !cardBackend) return null;
-  const feishu = {};
-  if (appId) feishu.app_id = appId;
-  if (secret) feishu.app_secret = secret;
-  if (replyDisplay) feishu.reply_display = replyDisplay;
-  if (cardBackend) feishu.card_backend = cardBackend;
-  return feishu;
+  const body = { agent_id: agentId };
+  if (appId) body.feishu_app_id = appId;
+  if (secret) body.feishu_app_secret = secret;
+  return body;
 }
 
 /** 转义 HTML 特殊字符（用于检测结果等纯文本插值）。 */
@@ -3044,10 +3568,22 @@ function renderFeishuDiagnostics(data) {
   settingsFeishuDiagnostics.innerHTML = `<p class="settings-feishu-diagnostics-summary">${escapeHtml(data.summary || "检测完成")}</p><ul class="settings-feishu-diagnostics-list">${items}</ul>`;
 }
 
-/** 调用后端检测飞书渠道连通性（可使用表单中未保存的凭证试连 Token）。 */
+/** 补启飞书长连接（保存凭证或检测前调用）。 */
+async function restartFeishuWs() {
+  try {
+    await fetch("/api/feishu/restart-ws", { method: "POST" });
+  } catch {
+    /* 忽略：检测或后台健康检查会再试 */
+  }
+}
+
+/** 调用后端检测当前编辑 Agent 的飞书连通性。 */
 async function runFeishuDiagnostics() {
-  const feishu = buildFeishuSettingsPayload();
-  const body = feishu ? { feishu } : {};
+  if (agentPanelMode === "empty") {
+    alert("请先在左侧选择或新建 Agent");
+    return;
+  }
+  const body = buildFeishuDiagnosticsPayload();
   if (btnSettingsFeishuDiagnose) {
     btnSettingsFeishuDiagnose.disabled = true;
     btnSettingsFeishuDiagnose.textContent = "检测中…";
@@ -3059,6 +3595,7 @@ async function runFeishuDiagnostics() {
       '<p class="settings-feishu-diagnostics-summary">正在检测…</p>';
   }
   try {
+    await restartFeishuWs();
     const res = await fetch("/api/feishu/diagnostics", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3090,7 +3627,7 @@ async function runFeishuDiagnostics() {
   }
 }
 
-/** 加载 API Key 与飞书配置状态到设置表单。 */
+/** 加载实例默认 API Key 到设置表单。 */
 async function loadSettingsIntoForm() {
   if (!settingsApiKeyInput || !settingsApiKeyHint) return;
   settingsApiKeyInput.value = "";
@@ -3099,7 +3636,7 @@ async function loadSettingsIntoForm() {
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
     if (data.configured && data.masked) {
-      settingsApiKeyHint.textContent = `已配置：${data.masked}（留空并保存则不会修改；点「清除密钥」可删除）`;
+      settingsApiKeyHint.textContent = `实例默认 Key 已配置：${data.masked}（留空并保存则不会修改；Agent 未配 Key 时使用）`;
       settingsApiKeyHint.className = "settings-hint ok";
       settingsApiKeyInput.placeholder = "输入新密钥以替换…";
     } else {
@@ -3107,16 +3644,10 @@ async function loadSettingsIntoForm() {
       settingsApiKeyHint.className = "settings-hint warn";
       settingsApiKeyInput.placeholder = "sk-…";
     }
-    applyFeishuSettingsToForm(data.feishu);
   } catch {
     settingsApiKeyHint.textContent = "无法读取设置状态";
     settingsApiKeyHint.className = "settings-hint warn";
-    if (settingsFeishuHint) {
-      settingsFeishuHint.textContent = "无法读取飞书配置状态";
-      settingsFeishuHint.className = "settings-hint warn";
-    }
   }
-  await loadMemoriesIntoForm();
 }
 
 /** 保存 API Key 与可选飞书配置到后端。 */
@@ -3161,16 +3692,34 @@ function initSettings() {
   });
 
   btnSettingsClearFeishu?.addEventListener("click", async () => {
-    if (!confirm("确定清除本机保存的飞书机器人配置？")) return;
+    if (agentPanelMode !== "edit" && agentPanelMode !== "create") {
+      alert("请先选择或新建 Agent");
+      return;
+    }
+    const targetId = editingAgentId || activeAgentId;
+    if (!targetId) {
+      alert("请先选择要清除飞书配置的 Agent");
+      return;
+    }
+    if (!confirm("确定清除该 Agent 的飞书机器人配置？")) return;
     try {
-      await saveSettings({ clear_feishu: true });
+      const res = await fetch(`/api/agents/${encodeURIComponent(targetId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clear_feishu: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      agentsCatalog = data.agents || agentsCatalog;
       if (settingsFeishuAppIdInput) settingsFeishuAppIdInput.value = "";
       if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
       if (settingsFeishuDiagnostics) {
         settingsFeishuDiagnostics.classList.add("hidden");
         settingsFeishuDiagnostics.innerHTML = "";
       }
-      await loadSettingsIntoForm();
+      applyFeishuSettingsToForm(null);
+      renderAgentSettingsList();
+      await restartFeishuWs();
     } catch (err) {
       alert("清除失败: " + (err.message || err));
     }
@@ -3185,15 +3734,11 @@ function initSettings() {
   settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const apiKey = settingsApiKeyInput?.value?.trim() || "";
-    const feishu = buildFeishuSettingsPayload();
     const payload = {};
     if (apiKey) payload.api_key = apiKey;
-    if (feishu) payload.feishu = feishu;
     try {
       await saveSettings(payload);
       settingsApiKeyInput.value = "";
-      if (settingsFeishuAppSecretInput) settingsFeishuAppSecretInput.value = "";
-      await saveMemoriesFromForm();
       await loadSettingsIntoForm();
       setSettingsOpen(false);
     } catch (err) {
@@ -3469,6 +4014,8 @@ function initLayoutResize() {
   initContextMenuLock();
   await initTheme();
   initSettings();
+  initSettingsTabs();
+  initAgentManagement();
   initFilePanel();
   initFileTreeContextMenu();
   initTextContextMenu();
@@ -3477,7 +4024,9 @@ function initLayoutResize() {
   initAppTooltip();
   initComposerPrefs();
   await loadModelsCatalog();
+  await loadAgentsCatalog();
   await loadSession();
+  initSessionSync();
   if (readStorageItem(HISTORY_OPEN_STORAGE_KEY) === "1") {
     setHistoryPanelOpen(true);
   }

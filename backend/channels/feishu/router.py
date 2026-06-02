@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from backend.channels.feishu.activity import record_webhook_request
-from backend.channels.feishu.config import is_enabled
+from backend.channels.feishu.config import is_enabled, list_feishu_enabled_agent_ids
 from backend.channels.feishu.crypto import (
     FeishuCryptoError,
     parse_challenge_response,
     parse_webhook_body,
 )
-from backend.channels.feishu.dispatch import dispatch_in_background
+from backend.channels.feishu.dispatch import dispatch_in_background, resolve_agent_id
 
 _log = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ async def feishu_webhook(request: Request) -> Response:
 
     未启用飞书配置时返回 503（不伪装 200，避免误以为已接入）。
     """
-    if not is_enabled():
+    if not list_feishu_enabled_agent_ids():
         return JSONResponse(
             status_code=_DISABLED_STATUS,
             content={"error": "飞书渠道未配置或未启用"},
@@ -48,9 +47,15 @@ async def feishu_webhook(request: Request) -> Response:
 
     challenge_resp = parse_challenge_response(payload)
     if challenge_resp:
-        record_webhook_request(payload, is_challenge=True)
         return JSONResponse(content=challenge_resp)
 
-    record_webhook_request(payload)
-    dispatch_in_background(payload)
+    agent_id = resolve_agent_id(payload)
+    if not agent_id or not is_enabled(agent_id):
+        return JSONResponse(
+            status_code=_DISABLED_STATUS,
+            content={"error": "无法匹配飞书 App ID 到已启用的 Agent"},
+        )
+
+    record_webhook_request(payload, agent_id=agent_id)
+    dispatch_in_background(payload, agent_id=agent_id)
     return JSONResponse(content={})

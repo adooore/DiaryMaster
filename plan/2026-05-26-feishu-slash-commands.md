@@ -5,8 +5,8 @@
 
 **关联文档**：
 
-- `2026-05-25-feishu.md`、`2026-05-25-feishu-roadmap.md`
-- `2026-05-26-agent-management.md`（Agent 层总纲；Session 指令 scoped 到当前 Agent）
+- `done-2026-05-25-feishu.md`、`2026-05-25-feishu-roadmap.md`
+- `2026-06-02-agent-management.md`（Agent 层总纲；Session 指令 scoped 到当前 Agent）
 
 **状态标记**：`待办` | `进行中` | `已完成` | `跳过`
 

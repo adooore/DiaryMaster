@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=40" />
+  <link rel="stylesheet" href="/static/style.css?v=52" />
 </head>
 <body>
   <header class="topbar">
@@ -74,6 +74,27 @@
     <aside class="panel panel-chat" id="panel-chat">
       <div class="panel-title agent-panel-head">
         <div class="session-control">
+          <div class="agent-picker" id="agent-picker">
+            <button
+              type="button"
+              class="agent-picker-trigger"
+              id="agent-picker-trigger"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              data-tooltip="切换 Agent"
+              data-tooltip-placement="below"
+            >
+              <span class="agent-picker-prefix">Agent</span>
+              <span class="agent-picker-label" id="agent-picker-label">—</span>
+              <span class="agent-picker-chevron" aria-hidden="true">▾</span>
+            </button>
+            <ul
+              class="agent-picker-menu hidden"
+              id="agent-picker-menu"
+              role="listbox"
+              aria-label="Agent 列表"
+            ></ul>
+          </div>
           <div class="session-tabs" id="session-tabs" role="tablist" aria-label="已打开的会话"></div>
         </div>
         <div class="session-actions">
@@ -157,95 +178,148 @@
     </aside>
   </main>
   <div id="settings-overlay" class="settings-overlay hidden" aria-hidden="true">
-    <div class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div id="settings-panel" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="settings-header">
-        <h2 id="settings-title" class="settings-title serif-title">设置</h2>
-        <button type="button" id="btn-settings-close" class="icon-btn" aria-label="关闭设置">×</button>
+        <div class="settings-header-text">
+          <h2 id="settings-title" class="settings-title serif-title">设置</h2>
+          <p class="settings-subtitle">Agent 与实例密钥</p>
+        </div>
+        <button type="button" id="btn-settings-close" class="icon-btn settings-close-btn" aria-label="关闭设置">×</button>
       </div>
+      <nav class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button type="button" class="settings-tab is-active" role="tab" id="settings-tab-agents" data-settings-tab="agents" aria-selected="true" aria-controls="settings-panel-agents">Agent</button>
+        <button type="button" class="settings-tab" role="tab" id="settings-tab-api" data-settings-tab="api" aria-selected="false" aria-controls="settings-panel-api">密钥</button>
+      </nav>
       <form id="settings-form" class="settings-form">
-        <label class="settings-label" for="settings-api-key">DeepSeek API Key</label>
-        <input
-          type="password"
-          id="settings-api-key"
-          class="settings-input"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="sk-…"
-        />
-        <p id="settings-api-key-hint" class="settings-hint"></p>
-        <p class="settings-hint settings-hint-muted">
-          在 <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer">DeepSeek 开放平台</a> 创建密钥后粘贴保存。仅保存在本机，不会上传到 Git。
-        </p>
-        <div class="settings-actions settings-actions--inline">
-          <button type="button" id="btn-settings-clear-key" class="btn secondary">清除密钥</button>
+        <div class="settings-tab-panel is-active" id="settings-panel-agents" role="tabpanel" aria-labelledby="settings-tab-agents" data-settings-panel="agents">
+          <div class="settings-agent-shell">
+            <aside class="settings-agent-sidebar" aria-label="Agent 列表">
+              <div class="settings-agent-sidebar-head">
+                <h3 class="settings-agent-sidebar-title">Agent <span id="settings-agent-count" class="settings-agent-count">0</span></h3>
+              </div>
+              <button type="button" id="btn-agent-new" class="settings-agent-new-btn">+ 新建</button>
+              <ul id="settings-agent-list" class="settings-agent-list" role="listbox" aria-label="选择 Agent"></ul>
+            </aside>
+            <div class="settings-agent-main">
+              <div id="settings-agent-empty" class="settings-agent-empty">
+                <p class="settings-agent-empty__desc">左侧选择 Agent，或点「+ 新建」</p>
+              </div>
+              <div id="settings-agent-editor" class="settings-agent-workspace hidden" aria-live="polite">
+                <div class="settings-agent-workspace-body">
+                  <section class="settings-agent-form-section">
+                    <div class="settings-agent-form-grid settings-agent-form-grid--basic">
+                      <div class="settings-field-group settings-field-group--full">
+                        <label class="settings-label" for="settings-agent-name">名称</label>
+                        <input type="text" id="settings-agent-name" class="settings-input" maxlength="80" placeholder="写作助手" />
+                        <p id="settings-agent-id-hint" class="settings-id-hint"></p>
+                      </div>
+                      <div class="settings-field-group settings-field-group--full">
+                        <label class="settings-label" for="settings-agent-role">人设</label>
+                        <textarea id="settings-agent-role" class="settings-textarea settings-textarea-sm" rows="2" placeholder="角色说明，可留空"></textarea>
+                      </div>
+                      <div class="settings-field-group">
+                        <label class="settings-label" for="settings-agent-workspace-mode">工作区</label>
+                        <select id="settings-agent-workspace-mode" class="settings-input">
+                          <option value="dedicated">独立</option>
+                          <option value="shared">共用</option>
+                        </select>
+                      </div>
+                      <div class="settings-field-group" id="settings-agent-workspace-ref-wrap">
+                        <label class="settings-label" for="settings-agent-workspace-ref">共用目标</label>
+                        <input type="text" id="settings-agent-workspace-ref" class="settings-input" placeholder="legacy" />
+                      </div>
+                      <div class="settings-field-group">
+                        <label class="settings-label" for="settings-agent-api-key">API Key</label>
+                        <input type="password" id="settings-agent-api-key" class="settings-input" autocomplete="off" spellcheck="false" placeholder="留空用实例 Key" />
+                        <p id="settings-agent-api-key-hint" class="settings-hint settings-hint-compact"></p>
+                      </div>
+                    </div>
+                  </section>
+                  <section class="settings-agent-form-section">
+                    <h4 class="settings-agent-form-section-title">飞书</h4>
+                    <div class="settings-agent-form-grid">
+                      <div class="settings-field-group">
+                        <label class="settings-label" for="settings-feishu-app-id">App ID</label>
+                        <input type="text" id="settings-feishu-app-id" class="settings-input" autocomplete="off" spellcheck="false" placeholder="cli_…" />
+                      </div>
+                      <div class="settings-field-group">
+                        <label class="settings-label" for="settings-feishu-app-secret">App Secret</label>
+                        <input type="password" id="settings-feishu-app-secret" class="settings-input" autocomplete="off" spellcheck="false" placeholder="留空不修改" />
+                      </div>
+                    </div>
+                    <div class="settings-feishu-bar">
+                      <p id="settings-feishu-hint" class="settings-hint settings-hint-compact"></p>
+                      <div class="settings-inline-actions settings-inline-actions--compact">
+                        <button type="button" id="btn-settings-feishu-diagnose" class="btn secondary btn-sm">检测</button>
+                        <button type="button" id="btn-settings-clear-feishu" class="settings-link-btn">清除</button>
+                      </div>
+                    </div>
+                    <details class="settings-agent-advanced">
+                      <summary class="settings-agent-advanced-summary">高级</summary>
+                      <div class="settings-agent-form-grid settings-agent-advanced-body">
+                        <div class="settings-field-group">
+                          <label class="settings-label" for="settings-feishu-reply-display">消息展示</label>
+                          <select id="settings-feishu-reply-display" class="settings-input">
+                            <option value="with_steps">过程 + 回复</option>
+                            <option value="reply_only">仅回复</option>
+                          </select>
+                        </div>
+                        <div class="settings-field-group">
+                          <label class="settings-label" for="settings-feishu-card-backend">卡片后端</label>
+                          <select id="settings-feishu-card-backend" class="settings-input">
+                            <option value="cardkit">CardKit</option>
+                            <option value="classic">Classic</option>
+                          </select>
+                        </div>
+                      </div>
+                    </details>
+                    <div id="settings-feishu-diagnostics" class="settings-feishu-diagnostics hidden" aria-live="polite"></div>
+                  </section>
+                  <section class="settings-agent-form-section">
+                    <h4 class="settings-agent-form-section-title">记忆</h4>
+                    <div class="settings-agent-form-grid settings-agent-form-grid--mem">
+                      <div class="settings-field-group">
+                        <label class="settings-label" for="settings-memory-user">USER</label>
+                        <textarea id="settings-memory-user" class="settings-textarea" rows="5" spellcheck="false" placeholder="用户偏好…"></textarea>
+                        <span id="settings-memory-user-usage" class="settings-usage-inline"></span>
+                      </div>
+                      <div class="settings-field-group">
+                        <label class="settings-label" for="settings-memory-memory">MEMORY</label>
+                        <textarea id="settings-memory-memory" class="settings-textarea" rows="5" spellcheck="false" placeholder="工作区约定…"></textarea>
+                        <span id="settings-memory-memory-usage" class="settings-usage-inline"></span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+                <footer class="settings-agent-workspace-foot">
+                  <button type="button" id="btn-agent-switch" class="btn secondary hidden">切换到此</button>
+                  <button type="button" id="btn-agent-delete" class="settings-link-btn settings-link-btn--danger hidden">删除</button>
+                  <div class="settings-agent-workspace-foot-right">
+                    <button type="button" id="btn-agent-cancel" class="btn secondary">取消</button>
+                    <button type="button" id="btn-agent-save" class="btn">保存</button>
+                  </div>
+                </footer>
+              </div>
+            </div>
+          </div>
         </div>
-        <hr class="settings-divider" />
-        <h3 class="settings-section-title">飞书机器人</h3>
-        <p class="settings-hint settings-hint-muted settings-hint--top">
-          在 <a href="https://open.feishu.cn/" target="_blank" rel="noopener noreferrer">飞书开放平台</a> → 应用凭证 中复制 App ID / App Secret。推荐在飞书后台选<strong>使用长连接接收事件</strong>（无需 HTTPS 隧道）；启动本应用后再保存订阅方式。
-        </p>
-        <label class="settings-label" for="settings-feishu-app-id">App ID</label>
-        <input
-          type="text"
-          id="settings-feishu-app-id"
-          class="settings-input"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="cli_…"
-        />
-        <label class="settings-label" for="settings-feishu-app-secret">App Secret</label>
-        <input
-          type="password"
-          id="settings-feishu-app-secret"
-          class="settings-input"
-          autocomplete="off"
-          spellcheck="false"
-        />
-        <p id="settings-feishu-hint" class="settings-hint"></p>
-        <label class="settings-label" for="settings-feishu-reply-display">最终消息展示</label>
-        <select id="settings-feishu-reply-display" class="settings-input">
-          <option value="with_steps">保留过程 + 回复</option>
-          <option value="reply_only">仅最终回复</option>
-        </select>
-        <p class="settings-hint settings-hint-muted">
-          写入 <code>data/feishu/config.json</code>；飞书卡片标题色跟随顶栏「深色/浅色」主题（存于 <code>user_settings.json</code>）。
-        </p>
-        <label class="settings-label" for="settings-feishu-card-backend">卡片后端</label>
-        <select id="settings-feishu-card-backend" class="settings-input">
-          <option value="cardkit">CardKit 实体（cardkit:card:write）</option>
-          <option value="classic">经典 interactive（im PATCH）</option>
-        </select>
-        <div class="settings-actions settings-actions--inline">
-          <button type="button" id="btn-settings-feishu-diagnose" class="btn secondary">检测连通</button>
-          <button type="button" id="btn-settings-clear-feishu" class="btn secondary">清除飞书配置</button>
+
+        <div class="settings-tab-panel" id="settings-panel-api" role="tabpanel" aria-labelledby="settings-tab-api" data-settings-panel="api" hidden>
+          <p class="settings-panel-desc">实例级默认 Key；各 Agent 未单独配置时使用此密钥。</p>
+          <div class="settings-field-group">
+            <label class="settings-label" for="settings-api-key">DeepSeek API Key</label>
+            <input type="password" id="settings-api-key" class="settings-input" autocomplete="off" spellcheck="false" placeholder="sk-…" />
+            <p id="settings-api-key-hint" class="settings-hint"></p>
+            <p class="settings-hint settings-hint-muted">
+              在 <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer">DeepSeek 开放平台</a> 创建密钥后粘贴保存。仅保存在本机。
+            </p>
+            <button type="button" id="btn-settings-clear-key" class="settings-link-btn settings-link-btn--danger">清除实例密钥</button>
+          </div>
         </div>
-        <div id="settings-feishu-diagnostics" class="settings-feishu-diagnostics hidden" aria-live="polite"></div>
-        <hr class="settings-divider" />
-        <h3 class="settings-section-title">长期记忆</h3>
-        <p class="settings-hint settings-hint-muted settings-hint--top">
-          跨会话偏好与习惯，存于本机 <code>data/memories/</code>。条目用 <code>§</code> 分隔；保存后<strong>新开的对话</strong>才会载入（当前对话仍用启动时的快照）。
-        </p>
-        <label class="settings-label" for="settings-memory-user">USER.md</label>
-        <textarea
-          id="settings-memory-user"
-          class="settings-textarea"
-          rows="5"
-          spellcheck="false"
-          placeholder="用户偏好、纠正、长期习惯…"
-        ></textarea>
-        <p id="settings-memory-user-usage" class="settings-hint settings-usage-hint"></p>
-        <label class="settings-label" for="settings-memory-memory">MEMORY.md</label>
-        <textarea
-          id="settings-memory-memory"
-          class="settings-textarea"
-          rows="6"
-          spellcheck="false"
-          placeholder="工作区整理约定等（非笔记正文）…"
-        ></textarea>
-        <p id="settings-memory-memory-usage" class="settings-hint settings-usage-hint"></p>
       </form>
       <div class="settings-footer">
-        <button type="submit" form="settings-form" class="btn" id="btn-settings-save">保存</button>
+        <span class="settings-footer-hint">保存实例默认密钥（Agent 在编辑区单独保存）</span>
+        <button type="submit" form="settings-form" class="btn" id="btn-settings-save">保存设置</button>
       </div>
     </div>
   </div>
@@ -277,6 +351,6 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
-  <script src="/static/app.js?v=44"></script>
+  <script src="/static/app.js?v=54"></script>
 </body>
 </html>

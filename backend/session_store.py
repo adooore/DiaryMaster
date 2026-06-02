@@ -15,8 +15,8 @@ from typing import Any
 
 from backend.config import APP_ROOT
 
-SESSIONS_DIR = APP_ROOT / "data" / "sessions"
-ACTIVE_ID_FILE = APP_ROOT / "data" / "active_session.txt"
+DEFAULT_SESSIONS_DIR = APP_ROOT / "data" / "sessions"
+DEFAULT_ACTIVE_ID_FILE = APP_ROOT / "data" / "active_session.txt"
 
 
 @dataclass
@@ -64,6 +64,7 @@ class Session:
     changes: list[FileChange] = field(default_factory=list)
     turn: int = 0
     chat_log: list[dict[str, Any]] = field(default_factory=list)
+    updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """供列表/顶栏展示的 Session 摘要。"""
@@ -71,6 +72,7 @@ class Session:
             "id": self.id,
             "title": self.title or self.id,
             "created_at": self.created_at,
+            "updated_at": self.updated_at or self.created_at,
             "turn": self.turn,
             "change_count": len(self.changes),
             "changes": [c.summary() for c in self.changes],
@@ -83,14 +85,21 @@ def _now_iso() -> str:
 
 
 class SessionStore:
-    """多 Session 管理：内存 + 本地 JSON 持久化（data/sessions/）。"""
+    """多 Session 管理：内存 + 本地 JSON 持久化。"""
 
-    def __init__(self) -> None:
-        """从磁盘加载所有 Session，若无则新建一个。"""
+    def __init__(
+        self,
+        *,
+        sessions_dir: Path | None = None,
+        active_id_file: Path | None = None,
+    ) -> None:
+        """从磁盘加载 Session；目录默认兼容旧版全局路径。"""
+        self._sessions_dir = sessions_dir or DEFAULT_SESSIONS_DIR
+        self._active_id_file = active_id_file or DEFAULT_ACTIVE_ID_FILE
         self._sessions: dict[str, Session] = {}
         self._active_id: str = ""
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-        ACTIVE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._active_id_file.parent.mkdir(parents=True, exist_ok=True)
         self._load_all_from_disk()
         if not self._sessions:
             self.new_session()
@@ -126,6 +135,12 @@ class SessionStore:
     def get_session(self) -> Session:
         """返回当前激活的 Session。"""
         return self._session
+
+    def get_session_by_id(self, session_id: str) -> Session:
+        """按 id 返回 Session（不切换激活）。"""
+        if session_id not in self._sessions:
+            raise ValueError(f"Session 不存在: {session_id}")
+        return self._sessions[session_id]
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """所有 Session 摘要列表（含 is_active），按创建时间倒序。"""
@@ -164,7 +179,7 @@ class SessionStore:
         if session_id not in self._sessions:
             raise ValueError(f"Session 不存在: {session_id}")
 
-        path = SESSIONS_DIR / f"{session_id}.json"
+        path = self._sessions_dir / f"{session_id}.json"
         del self._sessions[session_id]
         if path.is_file():
             path.unlink()
@@ -183,16 +198,19 @@ class SessionStore:
 
         return self._active_id
 
-    def _touch(self) -> None:
-        """持久化当前激活 Session。"""
-        self._persist(self._session)
+    def _touch(self, session: Session | None = None) -> None:
+        """持久化 Session 并刷新 updated_at。"""
+        target = session or self._session
+        target.updated_at = _now_iso()
+        self._persist(target)
 
     def _persist(self, session: Session) -> None:
         """将指定 Session 写入 data/sessions/{id}.json。"""
-        path = SESSIONS_DIR / f"{session.id}.json"
+        path = self._sessions_dir / f"{session.id}.json"
         data = {
             "id": session.id,
             "created_at": session.created_at,
+            "updated_at": session.updated_at or session.created_at,
             "title": session.title,
             "title_locked": session.title_locked,
             "turn": session.turn,
@@ -203,18 +221,18 @@ class SessionStore:
 
     def _read_active_id(self) -> str | None:
         """从 active_session.txt 读取上次激活的 id。"""
-        if not ACTIVE_ID_FILE.is_file():
+        if not self._active_id_file.is_file():
             return None
-        text = ACTIVE_ID_FILE.read_text(encoding="utf-8").strip()
+        text = self._active_id_file.read_text(encoding="utf-8").strip()
         return text or None
 
     def _write_active_id(self) -> None:
         """把当前 active_id 写入 active_session.txt。"""
-        ACTIVE_ID_FILE.write_text(self._active_id, encoding="utf-8")
+        self._active_id_file.write_text(self._active_id, encoding="utf-8")
 
     def _load_all_from_disk(self) -> None:
         """启动时加载 data/sessions 下全部 JSON。"""
-        for path in SESSIONS_DIR.glob("*.json"):
+        for path in self._sessions_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 session = self._session_from_json(data)
@@ -228,15 +246,17 @@ class SessionStore:
         changes = [
             FileChange(**c) for c in data.get("changes", [])
         ]
+        created = data.get("created_at") or _now_iso()
         return Session(
             id=data["id"],
-            created_at=data.get("created_at") or _now_iso(),
+            created_at=created,
             title=data.get("title", ""),
             title_locked=bool(data.get("title_locked")),
             turn=int(data.get("turn") or 0),
             chat_log=list(data.get("chat_log") or []),
             changes=changes,
             messages=[],
+            updated_at=data.get("updated_at") or created,
         )
 
     def rebuild_agent_messages_for(self, session: Session) -> None:
@@ -465,6 +485,93 @@ class SessionStore:
         self._session.chat_log.append(entry)
         self._touch()
 
+    def _find_live_assistant_index(self, turn: int) -> int:
+        """查找指定轮次进行中的 assistant 消息下标，不存在返回 -1。"""
+        for i in range(len(self._session.chat_log) - 1, -1, -1):
+            ev = self._session.chat_log[i]
+            if (
+                ev.get("type") == "message"
+                and ev.get("role") == "assistant"
+                and int(ev.get("turn") or 0) == turn
+                and ev.get("live")
+            ):
+                return i
+        return -1
+
+    def start_live_turn(self, user_text: str, turn: int, channel: str) -> None:
+        """IM 渠道轮次开始时写入 user + 进行中 assistant（供 Web 轮询同步）。"""
+        self.append_chat_message("user", user_text, turn=turn)
+        self._session.chat_log.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "text": "",
+                "turn": turn,
+                "steps": [],
+                "live": True,
+                "channel": channel,
+            }
+        )
+        self._touch()
+
+    def sync_live_assistant(
+        self,
+        turn: int,
+        *,
+        steps: list[dict[str, Any]] | None = None,
+        text: str | None = None,
+        reasoning: str | None = None,
+    ) -> None:
+        """更新进行中 assistant 的步骤快照（IM 渠道 on_step 调用）。"""
+        idx = self._find_live_assistant_index(turn)
+        if idx < 0:
+            return
+        ev = self._session.chat_log[idx]
+        if steps is not None:
+            ev["steps"] = [dict(s) for s in steps]
+        if text is not None:
+            ev["text"] = text
+        if reasoning:
+            ev["reasoning"] = reasoning
+        self._touch()
+
+    def finalize_live_assistant(
+        self,
+        turn: int,
+        *,
+        text: str,
+        steps: list[dict[str, Any]] | None = None,
+        reasoning: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> bool:
+        """若存在进行中 assistant，写入最终内容并清除 live 标记。"""
+        idx = self._find_live_assistant_index(turn)
+        if idx < 0:
+            return False
+        ev = self._session.chat_log[idx]
+        ev["text"] = text
+        if steps is not None:
+            ev["steps"] = [dict(s) for s in steps]
+        if reasoning:
+            ev["reasoning"] = reasoning
+        if usage:
+            ev["usage"] = usage
+        ev.pop("live", None)
+        ev.pop("channel", None)
+        self._touch()
+        return True
+
+    def abort_live_turn(self, turn: int, detail: str) -> None:
+        """IM 渠道出错时结束进行中轮次并写入错误说明。"""
+        msg = (detail or "未知错误").strip()
+        if self.finalize_live_assistant(
+            turn,
+            text=f"错误: {msg}",
+            steps=None,
+        ):
+            return
+        self.append_chat_message("assistant", f"错误: {msg}", turn=turn)
+
     def set_session_title(
         self,
         title: str,
@@ -483,7 +590,7 @@ class SessionStore:
         session.title = cleaned[:80]
         if manual:
             session.title_locked = True
-        self._persist(session)
+        self._touch(session)
         return session.title
 
     def append_chat_changes(self, turn: int, change_ids: list[str]) -> None:
@@ -495,10 +602,11 @@ class SessionStore:
         )
         self._touch()
 
-    def get_chat_log_for_api(self) -> list[dict[str, Any]]:
+    def get_chat_log_for_api(self, session_id: str | None = None) -> list[dict[str, Any]]:
         """展开 chat_log 供前端渲染（changes 事件内嵌变更摘要）。"""
+        session = self.get_session_by_id(session_id) if session_id else self._session
         result: list[dict[str, Any]] = []
-        for event in self._session.chat_log:
+        for event in session.chat_log:
             if event.get("type") == "changes":
                 ids = event.get("change_ids") or []
                 changes = []
@@ -533,4 +641,20 @@ class SessionStore:
         self._touch()
 
 
-store = SessionStore()
+class _StoreFacade:
+    """委托给当前 active Agent 的 SessionStore。"""
+
+    def _s(self) -> SessionStore:
+        from backend.agents.sessions import get_session_store
+
+        return get_session_store()
+
+    @property
+    def active_id(self) -> str:
+        return self._s().active_id
+
+    def __getattr__(self, name: str):
+        return getattr(self._s(), name)
+
+
+store = _StoreFacade()

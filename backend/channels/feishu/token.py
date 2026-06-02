@@ -1,4 +1,4 @@
-"""飞书 tenant_access_token 获取与进程内缓存。"""
+"""飞书 tenant_access_token 获取与按 App ID 缓存。"""
 
 from __future__ import annotations
 
@@ -16,54 +16,43 @@ _TOKEN_PATH = "/auth/v3/tenant_access_token/internal"
 _REFRESH_MARGIN_SEC = 60
 
 _lock = threading.Lock()
-_cached_token: str = ""
-_cached_expire_at: float = 0.0
+_cached_by_app: dict[str, tuple[str, float]] = {}
 
 
 class FeishuTokenError(Exception):
     """获取 tenant_access_token 失败。"""
 
 
-def invalidate_token_cache() -> None:
-    """清空内存 token 缓存（设置页保存飞书凭证后调用）。"""
-    global _cached_token, _cached_expire_at
+def invalidate_token_cache(app_id: str | None = None) -> None:
+    """清空 token 缓存；无 app_id 时清空全部。"""
     with _lock:
-        _cached_token = ""
-        _cached_expire_at = 0.0
+        if app_id:
+            _cached_by_app.pop(app_id.strip(), None)
+        else:
+            _cached_by_app.clear()
 
 
-def get_tenant_access_token(*, force_refresh: bool = False) -> str:
-    """
-    返回有效的 tenant_access_token；过期前 60 秒自动刷新。
+def get_tenant_access_token(*, agent_id: str | None = None, force_refresh: bool = False) -> str:
+    """返回有效的 tenant_access_token；过期前 60 秒自动刷新。"""
+    cfg = get_feishu_config(agent_id)
+    if not cfg.app_id or not cfg.app_secret:
+        raise FeishuTokenError("飞书 App ID 或 App Secret 未配置")
 
-    失败时抛出 FeishuTokenError，消息为中文摘要。
-    """
-    global _cached_token, _cached_expire_at
     now = time.time()
     with _lock:
-        if (
-            not force_refresh
-            and _cached_token
-            and now < _cached_expire_at - _REFRESH_MARGIN_SEC
-        ):
-            return _cached_token
+        if not force_refresh and cfg.app_id in _cached_by_app:
+            token, expire_at = _cached_by_app[cfg.app_id]
+            if token and now < expire_at - _REFRESH_MARGIN_SEC:
+                return token
 
-    cfg = get_feishu_config()
     token, expire = fetch_tenant_access_token(cfg.app_id, cfg.app_secret)
-
     with _lock:
-        _cached_token = token
-        _cached_expire_at = now + max(expire, 120)
-
+        _cached_by_app[cfg.app_id] = (token, now + max(expire, 120))
     return token
 
 
 def fetch_tenant_access_token(app_id: str, app_secret: str) -> tuple[str, int]:
-    """
-    用指定凭证换取 tenant_access_token（不写缓存）。
-
-    返回 (token, expire_seconds)；失败抛出 FeishuTokenError。
-    """
+    """用指定凭证换取 tenant_access_token（不写缓存）。"""
     if not app_id or not app_secret:
         raise FeishuTokenError("飞书 App ID 或 App Secret 未配置")
 

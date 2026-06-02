@@ -107,9 +107,20 @@ SYSTEM_PROMPT = f"""你是 DiaryMaster 的笔记助手，像朋友一样帮助�
 {SEARCH_TOOL_POLICY}"""
 
 
+def _system_prompt_base() -> str:
+    """全局规则 + 当前 Agent 人设 role_prompt。"""
+    from backend.agents.registry import agent_registry
+
+    profile = agent_registry.get_profile(agent_registry.active_agent_id)
+    role = (profile.role_prompt or "").strip()
+    if role:
+        return f"{SYSTEM_PROMPT}\n\n## 角色与人设\n\n{role}"
+    return SYSTEM_PROMPT
+
+
 def get_effective_system_prompt(session_id: str | None = None) -> str:
-    """基础规则 + 该 Session 冻结记忆块（供 context_usage 等模块调用）。"""
-    return effective_system_prompt(SYSTEM_PROMPT, session_id)
+    """基础规则 + 角色 + 该 Session 冻结记忆块（供 context_usage 等模块调用）。"""
+    return effective_system_prompt(_system_prompt_base(), session_id)
 
 
 def _norm_rel(path: str) -> str:
@@ -689,7 +700,7 @@ def clear_agent_cache() -> None:
 def _get_agent(model_id: str, thinking_enabled: bool, session_id: str):
     """按 (model_id, thinking, session_id) 缓存 Agent；system prompt 含该 Session 冻结记忆。"""
     mid = validate_model_id(model_id)
-    effective = effective_system_prompt(SYSTEM_PROMPT, session_id)
+    effective = effective_system_prompt(_system_prompt_base(), session_id)
     key = (mid, bool(thinking_enabled), effective)
     if key not in _agent_cache:
         _agent_cache[key] = _build_agent(mid, key[1], effective)
@@ -840,15 +851,23 @@ def chat_stream(
 def persist_chat_turn(user_text: str, done: dict) -> str | None:
     """把 done 事件写入 session chat_log（与 Web SSE 持久化一致）。返回自动标题（若有）。"""
     turn = done["turn"]
-    store.append_chat_message("user", user_text, turn=turn)
-    store.append_chat_message(
-        "assistant",
-        done.get("reply", ""),
-        turn=turn,
+    finalized = store.finalize_live_assistant(
+        turn,
+        text=done.get("reply", ""),
         steps=done.get("steps"),
         reasoning=done.get("reasoning"),
         usage=done.get("usage"),
     )
+    if not finalized:
+        store.append_chat_message("user", user_text, turn=turn)
+        store.append_chat_message(
+            "assistant",
+            done.get("reply", ""),
+            turn=turn,
+            steps=done.get("steps"),
+            reasoning=done.get("reasoning"),
+            usage=done.get("usage"),
+        )
     changes = done.get("changes") or []
     if changes:
         store.append_chat_changes(turn, [c["id"] for c in changes])
@@ -876,6 +895,9 @@ def _chat_stream_events(
     _current_turn = store.begin_turn()
     turn = _current_turn
     _chat_channel = channel
+
+    if channel:
+        store.start_live_turn(user_message.strip(), turn, channel)
 
     mid = validate_model_id(model_id)
     thinking = bool(thinking_enabled)
@@ -1051,6 +1073,16 @@ def chat_once(
         return {"type": "error", "detail": "消息不能为空"}
     done: dict[str, Any] | None = None
     try:
+        def _on_step_event(step: dict[str, Any]) -> None:
+            """同步步骤到 IM 状态消息与 Session chat_log（供 Web 轮询）。"""
+            if on_step is not None:
+                on_step(step)
+            if channel:
+                store.sync_live_assistant(
+                    _current_turn,
+                    steps=[dict(s) for s in _collected_steps],
+                )
+
         for event in _chat_stream_events(
             user_text,
             current_file,
@@ -1061,9 +1093,14 @@ def chat_once(
             if event.get("type") == "done":
                 done = event
             elif event.get("type") == "error":
+                if channel:
+                    store.abort_live_turn(
+                        int(event.get("turn") or _current_turn),
+                        str(event.get("detail") or "未知错误"),
+                    )
                 return event
-            elif on_step is not None and event.get("kind"):
-                on_step(event)
+            elif event.get("kind"):
+                _on_step_event(event)
         if not done:
             return {"type": "error", "detail": "Agent 未返回结果"}
         persist_chat_turn(user_text, done)
@@ -1127,6 +1164,7 @@ def get_session_info() -> dict:
     """当前 Session 元数据 + 展开后的 chat_log（含变更摘要）。"""
     session = store.get_session()
     info = session.to_dict()
+    info["updated_at"] = session.updated_at or session.created_at
     info["chat_log"] = store.get_chat_log_for_api()
     return info
 

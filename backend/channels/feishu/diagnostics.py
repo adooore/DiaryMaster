@@ -43,18 +43,38 @@ def _check(
     return item
 
 
-def _resolve_credentials(override: dict[str, Any] | None) -> FeishuConfig:
-    """合并磁盘/环境变量配置与检测请求中的临时凭证。"""
-    cfg = get_feishu_config()
+def _resolve_credentials(
+    agent_id: str | None,
+    override: dict[str, Any] | None,
+) -> FeishuConfig:
+    """合并 Agent 磁盘配置与检测请求中的临时凭证。"""
+    from backend.agents.context import get_active_agent_id
+
+    aid = (agent_id or "").strip() or get_active_agent_id()
+    cfg = get_feishu_config(aid)
     if not override:
         return cfg
-    app_id = (override.get("app_id") or cfg.app_id or "").strip()
-    app_secret = (override.get("app_secret") or cfg.app_secret or "").strip()
-    return FeishuConfig(app_id=app_id, app_secret=app_secret)
+    app_id = (
+        override.get("feishu_app_id")
+        or override.get("app_id")
+        or cfg.app_id
+        or ""
+    ).strip()
+    app_secret = (
+        override.get("feishu_app_secret")
+        or override.get("app_secret")
+        or cfg.app_secret
+        or ""
+    ).strip()
+    return FeishuConfig(app_id=app_id, app_secret=app_secret, agent_id=aid)
 
 
-def _config_source_notes() -> list[dict[str, str]]:
-    """若凭证来自环境变量，追加说明项。"""
+def _config_source_notes(agent_id: str) -> list[dict[str, str]]:
+    """若 default Agent 凭证来自环境变量，追加说明项。"""
+    from backend.agents.profile import DEFAULT_AGENT_ID
+
+    if agent_id != DEFAULT_AGENT_ID:
+        return []
     items: list[dict[str, str]] = []
     if os.environ.get("FEISHU_APP_ID", "").strip():
         items.append(
@@ -146,15 +166,18 @@ def _probe_webhook_local() -> dict[str, str]:
 
 
 def run_feishu_diagnostics(
+    *,
+    agent_id: str | None = None,
     override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     执行飞书渠道检测，返回分项结果与汇总。
 
-    override 可传入设置页表单中的 app_id / app_secret（未保存时用于试连）。
+    override 可传入 Agent 编辑区表单中的 feishu_app_id / feishu_app_secret（未保存时试连）。
     """
     checks: list[dict[str, str]] = []
-    cfg = _resolve_credentials(override)
+    cfg = _resolve_credentials(agent_id, override)
+    aid = cfg.agent_id
 
     if not cfg.app_id:
         checks.append(
@@ -163,7 +186,7 @@ def run_feishu_diagnostics(
                 "App ID",
                 "fail",
                 "未配置",
-                hint="在设置页填写 App ID 并保存，或在检测前填入表单",
+                hint="在 Agent 编辑区填写 App ID 并保存，或在检测前填入表单",
             )
         )
     else:
@@ -184,18 +207,18 @@ def run_feishu_diagnostics(
     else:
         checks.append(_check("app_secret", "App Secret", "ok", "已配置"))
 
-    if cfg.app_id and cfg.app_secret and not is_enabled():
+    if cfg.app_id and cfg.app_secret and not is_enabled(aid):
         checks.append(
             _check(
                 "saved_config",
                 "已保存配置",
                 "warn",
                 "凭证尚未写入本机或 Secret 未保存",
-                hint="填写 App Secret 后请先点「保存」，否则 Webhook 仍会返回 503",
+                hint="填写 App Secret 后请先点「保存 Agent」，否则 Webhook 仍会返回 503",
             )
         )
 
-    checks.extend(_config_source_notes())
+    checks.extend(_config_source_notes(aid))
 
     if cfg.app_id and cfg.app_secret:
         try:
@@ -229,7 +252,7 @@ def run_feishu_diagnostics(
             )
         )
 
-    if is_enabled() or (cfg.app_id and cfg.app_secret):
+    if is_enabled(aid) or (cfg.app_id and cfg.app_secret):
         checks.append(_probe_webhook_local())
     else:
         checks.append(
@@ -241,12 +264,24 @@ def run_feishu_diagnostics(
             )
         )
 
-    activity = get_activity_status()
-    ws = get_ws_client_status()
+    activity = get_activity_status(aid)
+    try:
+        from backend.channels.feishu.ws_client import reconcile_ws_clients
+
+        reconcile_ws_clients()
+    except ImportError:
+        pass
+    ws_all = get_ws_client_status()
+    ws_agents = ws_all.get("agents") or []
+    ws = next((item for item in ws_agents if item.get("agent_id") == aid), None) or {
+        "thread_alive": False,
+        "status": "stopped",
+        "detail": "",
+    }
     total = activity.get("total_requests") or 0
     age = activity.get("last_age_sec")
 
-    if is_enabled():
+    if is_enabled(aid):
         ws_alive = ws.get("thread_alive")
         ws_status = ws.get("status") or "stopped"
         ws_detail = ws.get("detail") or ""
@@ -330,7 +365,7 @@ def run_feishu_diagnostics(
             st = "warn"
         checks.append(_check("inbound_events", "飞书消息到达", st, detail))
 
-    if get_api_key():
+    if get_api_key(aid):
         checks.append(
             _check(
                 "deepseek_api_key",
@@ -346,7 +381,7 @@ def run_feishu_diagnostics(
                 "DeepSeek API Key",
                 "warn",
                 "未配置",
-                hint="飞书能收到消息但 Agent 无法回复，请在设置页填写 API Key",
+                hint="飞书能收到消息但 Agent 无法回复，请在设置页填写该 Agent 或实例 API Key",
             )
         )
 
@@ -401,6 +436,7 @@ def run_feishu_diagnostics(
         "ok": overall == "ok",
         "overall": overall,
         "summary": summary,
+        "agent_id": aid,
         "webhook_path": _WEBHOOK_PATH,
         "activity": activity,
         "ws": ws,

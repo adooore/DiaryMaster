@@ -1,4 +1,4 @@
-"""飞书渠道配置 Agent 工具（写入 data/feishu/config.json）。"""
+"""飞书渠道配置 Agent 工具（写入 data/agents/{id}/feishu/config.json）。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def configure_feishu_channel(
     card_backend: str = "",
 ) -> str:
     """
-    更新飞书机器人渠道行为配置（写入本机 data/feishu/config.json）。
+    更新当前 Agent 的飞书渠道行为配置（写入 data/agents/{id}/feishu/config.json）。
 
     reply_display 取值：
     - with_steps：最终消息保留 Agent 步骤过程，并在下方附回复正文

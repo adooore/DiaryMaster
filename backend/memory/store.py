@@ -9,7 +9,6 @@ from typing import Literal
 
 from backend.config import APP_ROOT
 
-MEMORIES_DIR = APP_ROOT / "data" / "memories"
 USER_LIMIT = 1375
 MEMORY_LIMIT = 2200
 
@@ -35,9 +34,18 @@ class MemoryLimitExceeded(MemoryStoreError):
     """写入后超过该 store 的字符上限。"""
 
 
-def _ensure_dir() -> None:
-    """确保 data/memories/ 目录存在。"""
-    MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
+def _memories_dir(agent_id: str | None = None) -> Path:
+    """返回指定 Agent 的记忆目录。"""
+    from backend.agents.context import get_active_agent_id
+    from backend.agents.registry import agent_registry
+
+    aid = (agent_id or "").strip() or get_active_agent_id()
+    return agent_registry.memories_dir(aid)
+
+
+def _ensure_dir(agent_id: str | None = None) -> None:
+    """确保当前 Agent 的 memories 目录存在。"""
+    _memories_dir(agent_id).mkdir(parents=True, exist_ok=True)
 
 
 def _normalize_store(store: str) -> StoreName:
@@ -48,10 +56,10 @@ def _normalize_store(store: str) -> StoreName:
     return key  # type: ignore[return-value]
 
 
-def _path_for_store(store: str) -> Path:
+def _path_for_store(store: str, agent_id: str | None = None) -> Path:
     """返回指定 store 对应的 Markdown 文件路径。"""
     name = _normalize_store(store)
-    return MEMORIES_DIR / _STORE_FILES[name]
+    return _memories_dir(agent_id) / _STORE_FILES[name]
 
 
 def _limit_for_store(store: str) -> int:
@@ -67,10 +75,10 @@ def _read_raw(store: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _write_raw(store: str, content: str) -> None:
+def _write_raw(store: str, content: str, agent_id: str | None = None) -> None:
     """将全文写入 store 文件（自动创建目录与空文件）。"""
-    _ensure_dir()
-    _path_for_store(store).write_text(content, encoding="utf-8")
+    _ensure_dir(agent_id)
+    _path_for_store(store, agent_id).write_text(content, encoding="utf-8")
 
 
 def _parse_entries(content: str) -> list[str]:

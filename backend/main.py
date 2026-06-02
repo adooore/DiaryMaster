@@ -100,28 +100,19 @@ class SessionTitleRequest(BaseModel):
     title: str
 
 
-class FeishuSettingsUpdate(BaseModel):
-    """PUT /api/settings 中的飞书配置块（密钥留空表示不修改）。"""
-
-    app_id: str | None = None
-    app_secret: str | None = None
-    reply_display: str | None = None
-    card_backend: str | None = None
-
-
 class SettingsUpdateRequest(BaseModel):
-    """PUT /api/settings：保存或清除 API Key 与飞书机器人配置。"""
+    """PUT /api/settings：保存或清除实例级 API Key 与 UI 主题。"""
 
     api_key: str | None = None
     ui_theme: str | None = None
-    feishu: FeishuSettingsUpdate | None = None
-    clear_feishu: bool = False
 
 
 class FeishuDiagnosticsRequest(BaseModel):
-    """POST /api/feishu/diagnostics：可选传入表单中的未保存凭证。"""
+    """POST /api/feishu/diagnostics：检测指定 Agent 的飞书连通性。"""
 
-    feishu: FeishuSettingsUpdate | None = None
+    agent_id: str | None = None
+    feishu_app_id: str | None = None
+    feishu_app_secret: str | None = None
 
 
 class MemoriesUpdateRequest(BaseModel):
@@ -131,100 +122,24 @@ class MemoriesUpdateRequest(BaseModel):
     memory: str = ""
 
 
-_FEISHU_SECRET_KEYS = ("app_secret",)
-_FEISHU_LEGACY_KEYS = ("verification_token", "encrypt_key")
-
-
-def _feishu_block_from_disk() -> dict:
-    """从 user_settings.json 读取 feishu 对象（不含环境变量覆盖）。"""
-    from backend.user_settings import load_settings
-
-    raw = load_settings().get("feishu")
-    return raw if isinstance(raw, dict) else {}
-
-
-def _feishu_settings_status() -> dict:
-    """飞书配置展示块：app_id 明文，密钥 masked + configured，enabled 表示可启用 webhook。"""
-    from backend.user_settings import mask_api_key
-
-    from backend.channels.feishu.channel_config import channel_config_for_api
-
-    block = _feishu_block_from_disk()
-    app_id = (block.get("app_id") or "").strip()
-    app_secret = (block.get("app_secret") or "").strip()
-    configured = bool(app_id and app_secret)
-    return {
-        "enabled": configured,
-        "configured": configured,
-        "app_id": app_id,
-        "app_secret_masked": mask_api_key(app_secret) if app_secret else "",
-        "app_secret_configured": bool(app_secret),
-        **channel_config_for_api(),
-    }
-
-
-def _apply_feishu_settings(
-    feishu: FeishuSettingsUpdate | None,
-    *,
-    clear: bool = False,
-) -> None:
-    """写入或清除 user_settings.json 中的 feishu 块；密钥留空不覆盖旧值。"""
-    from backend.user_settings import load_settings, save_settings
-
-    data = load_settings()
-    if clear:
-        data.pop("feishu", None)
-        save_settings(data)
-        return
-    if feishu is None:
-        return
-    if feishu.reply_display is not None or feishu.card_backend is not None:
-        from backend.channels.feishu.channel_config import apply_channel_config_patch
-
-        patch: dict[str, str] = {}
-        if feishu.reply_display is not None:
-            patch["reply_display"] = feishu.reply_display
-        if feishu.card_backend is not None:
-            patch["card_backend"] = feishu.card_backend
-        apply_channel_config_patch(patch)
-    block = dict(data.get("feishu") or {}) if isinstance(data.get("feishu"), dict) else {}
-    if feishu.app_id is not None:
-        block["app_id"] = feishu.app_id.strip()
-    for key in _FEISHU_SECRET_KEYS:
-        val = getattr(feishu, key, None)
-        if val is None:
-            continue
-        cleaned = val.strip()
-        if cleaned:
-            block[key] = cleaned
-    for key in _FEISHU_LEGACY_KEYS:
-        block.pop(key, None)
-    if block:
-        data["feishu"] = block
-    else:
-        data.pop("feishu", None)
-    save_settings(data)
-
-
-def _invalidate_feishu_token_cache() -> None:
-    """保存飞书凭证后使 tenant_access_token 内存缓存失效（F2 实现后生效）。"""
-    try:
-        from backend.channels.feishu.token import invalidate_token_cache
-    except ImportError:
-        return
-    invalidate_token_cache()
-
-
 def _settings_payload() -> dict:
-    """GET /api/settings 完整响应（API Key + 飞书 + UI 主题）。"""
+    """GET /api/settings 完整响应（实例 API Key + UI 主题 + 当前 Agent）。"""
+    from backend.agents.registry import agent_registry
     from backend.ui_theme import ui_theme_for_api
 
-    return {**api_key_status(), **ui_theme_for_api(), "feishu": _feishu_settings_status()}
+    return {
+        **api_key_status(),
+        **ui_theme_for_api(),
+        "active_agent_id": agent_registry.active_agent_id,
+    }
 
 
 @app.on_event("startup")
 def _on_startup() -> None:
-    """应用启动：注入 API Key，并启动飞书 WebSocket 长连接（若已配置）。"""
+    """应用启动：Agent 迁移、API Key 同步、飞书长连接。"""
+    from backend.agents import bootstrap_agents
+
+    bootstrap_agents()
     bootstrap_api_key_from_disk()
     try:
         from backend.channels.feishu.ws_client import start_feishu_ws_client
@@ -246,16 +161,23 @@ try:
 except ImportError:
     pass
 
+try:
+    from backend.agents.api import router as agents_router
+
+    app.include_router(agents_router)
+except ImportError:
+    pass
+
 
 @app.get("/api/settings")
 def api_get_settings():
-    """读取 API Key 与飞书配置状态（脱敏）。"""
+    """读取实例 API Key 状态（脱敏）与 UI 主题。"""
     return _settings_payload()
 
 
 @app.put("/api/settings")
 def api_update_settings(body: SettingsUpdateRequest):
-    """保存或清除 DeepSeek API Key / 飞书配置，并清空 Agent 缓存。"""
+    """保存或清除实例级 DeepSeek API Key / UI 主题，并清空 Agent 缓存。"""
     from backend.agent import clear_agent_cache
 
     if body.api_key is not None:
@@ -264,27 +186,42 @@ def api_update_settings(body: SettingsUpdateRequest):
         from backend.ui_theme import set_ui_theme
 
         set_ui_theme(body.ui_theme)
-    if body.clear_feishu:
-        _apply_feishu_settings(None, clear=True)
-    elif body.feishu is not None:
-        _apply_feishu_settings(body.feishu)
     clear_agent_cache()
-    _invalidate_feishu_token_cache()
     return {"ok": True, **_settings_payload()}
 
 
 @app.post("/api/feishu/diagnostics")
 def api_feishu_diagnostics(body: FeishuDiagnosticsRequest | None = None):
-    """检测飞书凭证、本机 webhook 与 Agent 依赖项。"""
+    """检测指定 Agent 的飞书凭证、长连接与消息到达情况。"""
     try:
         from backend.channels.feishu.diagnostics import run_feishu_diagnostics
     except ImportError as e:
         raise HTTPException(status_code=503, detail="飞书渠道模块未就绪") from e
 
+    agent_id = body.agent_id if body and body.agent_id else None
     override: dict | None = None
-    if body and body.feishu is not None:
-        override = body.feishu.model_dump(exclude_none=True)
-    return run_feishu_diagnostics(override=override)
+    if body and (body.feishu_app_id is not None or body.feishu_app_secret is not None):
+        override = {
+            k: v
+            for k, v in {
+                "feishu_app_id": body.feishu_app_id,
+                "feishu_app_secret": body.feishu_app_secret,
+            }.items()
+            if v is not None
+        }
+    return run_feishu_diagnostics(agent_id=agent_id, override=override)
+
+
+@app.post("/api/feishu/restart-ws")
+def api_feishu_restart_ws():
+    """补启或强制重启全部已配置 Agent 的飞书长连接。"""
+    try:
+        from backend.channels.feishu.ws_client import get_ws_client_status, restart_feishu_ws_clients
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail="飞书渠道模块未就绪") from e
+
+    started = restart_feishu_ws_clients(force=True)
+    return {"ok": True, "started": started, "ws": get_ws_client_status()}
 
 
 @app.get("/api/memories")
@@ -328,10 +265,28 @@ def api_session_context_usage(model_id: str | None = None):
 @app.get("/api/session")
 def api_get_session():
     """当前激活 Session 的详情与 chat_log。"""
+    from backend.agents.registry import agent_registry
+
     info = agent.get_session_info()
     info["sessions"] = agent.list_sessions()
     info["active_id"] = store.active_id
+    info["active_agent_id"] = agent_registry.active_agent_id
     return info
+
+
+@app.get("/api/session/{session_id}/sync")
+def api_session_sync(session_id: str):
+    """指定 Session 的 chat_log 与 updated_at（不切换激活，供 Web 轮询 IM 进度）。"""
+    try:
+        session = store.get_session_by_id(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {
+        "id": session.id,
+        "turn": session.turn,
+        "updated_at": session.updated_at or session.created_at,
+        "chat_log": store.get_chat_log_for_api(session_id),
+    }
 
 
 @app.get("/api/sessions")

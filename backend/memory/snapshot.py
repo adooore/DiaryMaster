@@ -1,25 +1,34 @@
-"""Session 级记忆快照：启动/切换时冻结，本会话内不随 memory 工具写盘而更新。"""
+"""Session 级记忆快照：按 (agent_id, session_id) 冻结。"""
 
 from __future__ import annotations
 
 from backend.memory.prompt import build_memory_snapshot, build_system_prompt
 from backend.session_store import store
 
-_snapshots: dict[str, str] = {}
+_snapshots: dict[tuple[str, str], str] = {}
+
+
+def _snapshot_key(session_id: str | None = None) -> tuple[str, str]:
+    """当前 agent + session 的快照键。"""
+    from backend.agents.context import get_active_agent_id
+
+    sid = session_id or store.get_session().id
+    return get_active_agent_id(), sid
 
 
 def refresh(session_id: str) -> str:
     """从磁盘读取记忆并冻结到该 Session（new_session / 首次激活时调用）。"""
     snapshot = build_memory_snapshot()
-    _snapshots[session_id] = snapshot
+    _snapshots[_snapshot_key(session_id)] = snapshot
     return snapshot
 
 
 def ensure(session_id: str) -> str:
     """返回该 Session 已冻结的快照；未缓存时从磁盘加载并冻结。"""
-    if session_id not in _snapshots:
+    key = _snapshot_key(session_id)
+    if key not in _snapshots:
         return refresh(session_id)
-    return _snapshots[session_id]
+    return _snapshots[key]
 
 
 def get(session_id: str | None = None) -> str:
@@ -30,7 +39,10 @@ def get(session_id: str | None = None) -> str:
 
 def drop(session_id: str) -> None:
     """删除 Session 时丢弃其快照缓存。"""
-    _snapshots.pop(session_id, None)
+    from backend.agents.context import get_active_agent_id
+
+    aid = get_active_agent_id()
+    _snapshots.pop((aid, session_id), None)
 
 
 def effective_system_prompt(base: str, session_id: str | None = None) -> str:

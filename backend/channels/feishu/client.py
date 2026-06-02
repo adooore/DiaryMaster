@@ -52,9 +52,10 @@ def _request_json(
     *,
     method: str,
     body: bytes | None = None,
+    agent_id: str | None = None,
 ) -> str:
     """发起带 tenant token 的 JSON 请求并返回响应文本。"""
-    token = get_tenant_access_token()
+    token = get_tenant_access_token(agent_id=agent_id)
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Authorization": f"Bearer {token}",
@@ -80,6 +81,8 @@ def send_text_message(
     receive_id: str,
     receive_id_type: str,
     text: str,
+    *,
+    agent_id: str | None = None,
 ) -> str:
     """
     发送单条文本消息并返回 message_id（供后续 PUT 更新）。
@@ -99,7 +102,7 @@ def send_text_message(
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    raw = _request_json(url, method="POST", body=body)
+    raw = _request_json(url, method="POST", body=body, agent_id=agent_id)
     return _parse_api_response(raw, expect_message_id=True)
 
 
@@ -107,6 +110,8 @@ def send_interactive_card(
     receive_id: str,
     receive_id_type: str,
     card: dict[str, Any],
+    *,
+    agent_id: str | None = None,
 ) -> str:
     """发送 interactive 卡片消息并返回 message_id（供后续 PATCH 更新）。"""
     query = urllib.parse.urlencode({"receive_id_type": receive_id_type})
@@ -120,22 +125,32 @@ def send_interactive_card(
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    raw = _request_json(url, method="POST", body=body)
+    raw = _request_json(url, method="POST", body=body, agent_id=agent_id)
     return _parse_api_response(raw, expect_message_id=True)
 
 
-def update_interactive_card(message_id: str, card: dict[str, Any]) -> None:
+def update_interactive_card(
+    message_id: str,
+    card: dict[str, Any],
+    *,
+    agent_id: str | None = None,
+) -> None:
     """PATCH 更新已发送的 interactive 卡片（需卡片 config.update_multi=true 与 im:message:update）。"""
     if not message_id:
         raise FeishuClientError("message_id 为空")
     url = f"{_FEISHU_API_BASE}{_MESSAGES_PATH}/{urllib.parse.quote(message_id, safe='')}"
     content = json.dumps(card, ensure_ascii=False)
     body = json.dumps({"content": content}, ensure_ascii=False).encode("utf-8")
-    raw = _request_json(url, method="PATCH", body=body)
+    raw = _request_json(url, method="PATCH", body=body, agent_id=agent_id)
     _parse_api_response(raw)
 
 
-def update_text(message_id: str, text: str) -> None:
+def update_text(
+    message_id: str,
+    text: str,
+    *,
+    agent_id: str | None = None,
+) -> None:
     """更新机器人已发送的文本消息（im:message:update）。"""
     if not message_id:
         raise FeishuClientError("message_id 为空")
@@ -149,7 +164,7 @@ def update_text(message_id: str, text: str) -> None:
         {"msg_type": "text", "content": content},
         ensure_ascii=False,
     ).encode("utf-8")
-    raw = _request_json(url, method="PUT", body=body)
+    raw = _request_json(url, method="PUT", body=body, agent_id=agent_id)
     _parse_api_response(raw)
 
 
@@ -157,15 +172,19 @@ def _post_message(
     receive_id: str,
     receive_id_type: str,
     text: str,
+    *,
+    agent_id: str | None = None,
 ) -> None:
     """调用 im/v1/messages 发送一条文本消息（不返回 message_id）。"""
-    send_text_message(receive_id, receive_id_type, text)
+    send_text_message(receive_id, receive_id_type, text, agent_id=agent_id)
 
 
 def send_text(
     receive_id: str,
     receive_id_type: str,
     text: str,
+    *,
+    agent_id: str | None = None,
 ) -> None:
     """
     向指定接收方发送文本；超长时按 _TEXT_SEGMENT_CHARS 分段多条发送。
@@ -179,7 +198,7 @@ def send_text(
         payload = chunk
         if len(chunks) > 1:
             payload = f"({i + 1}/{len(chunks)})\n{chunk}"
-        _post_message(receive_id, receive_id_type, payload)
+        _post_message(receive_id, receive_id_type, payload, agent_id=agent_id)
 
 
 def _split_text(text: str) -> list[str]:

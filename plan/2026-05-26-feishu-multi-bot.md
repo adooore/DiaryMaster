@@ -1,12 +1,13 @@
 # 多飞书机器人（多角色）— 架构规划
 
 **日期**：2026-05-26（规划，未开发）  
-**用途**：记录后续目标——**一个 DiaryMaster 服务绑定多个飞书自建应用（不同角色）**，各角色 **Session / 长期记忆隔离**，**日记与工作区文件共享**。
+**用途**：记录后续目标——**一个 DiaryMaster 服务绑定多个飞书自建应用**，各 App 对应一个 **Agent（使用者/租户）**；**Session、记忆、日记 workspace 全隔离**，支持 **单机部署、多人使用**。
 
 **关联文档**：
 
-- `2026-05-26-agent-management.md`（**总纲**：Web Agent 管理套在 Session 之上；本文飞书多 App 为 Agent 的渠道实现）
-- `2026-05-25-feishu.md` / `2026-05-25-feishu-roadmap.md`（单机器人现状）
+- `2026-06-02-agent-management.md`（**总纲**，2026-06-02 需求对齐；Session / 工作区 / 记忆 / Key 按 Agent）
+- `2026-05-26-agent-management.md`（2026-05-26 初版，已被 6-2 文档 supersede 部分章节）
+- `done-2026-05-25-feishu.md` / `2026-05-25-feishu-roadmap.md`（单机器人现状）
 - `2026-05-26-feishu-slash-commands.md`（Agent **内** Session `/` 指令）
 
 **状态标记**：`待办` | `进行中` | `已完成` | `跳过`
@@ -15,7 +16,7 @@
 
 ## 1. 产品目标（一句话）
 
-同一台 DiaryMaster 进程里跑 **N 个飞书机器人**（如「写作助手」「复盘教练」），每个机器人对应一个 **Agent**（见 `2026-05-26-agent-management.md`）：不同人设与记忆、不同 Session 线；**日记与工作区文件仍共享**。
+同一台 DiaryMaster 进程里跑 **N 个飞书机器人**，每个 App 绑定一个 **Agent**（见 `2026-06-02-agent-management.md`）：**人设、记忆、Session 隔离**；workspace 可独立或共用；典型场景为 **家人/同事各用一个 Agent + 各绑一个飞书 bot**。
 
 > **术语**：下文 `bot_id` 与 Agent 文档中的 **`agent_id` 同义**；实现时统一用 `agent_id`。
 
@@ -31,7 +32,7 @@
 | Session | 全局 `data/sessions/`，`open_id` 绑定 | **按 bot 隔离**（同用户在 bot A/B 各有一条 active 线） |
 | 长期记忆 | 全局 `data/memories/USER.md` + `MEMORY.md` | **每 bot 一套** USER/MEMORY（或按 role_id） |
 | 记忆快照 | `session_id → snapshot` | **`(bot_id, session_id)`** 二维键 |
-| 工作区 | `workspace/` | **不变，全员共享** |
+| 工作区 | 全局 `workspace/` | **`data/agents/{agent_id}/workspace/`** |
 | System Prompt | 全局 `SYSTEM_PROMPT` + 记忆块 | **每 bot 可配** role_prompt / 名称 / 工具策略 |
 | Web 设置页 | 一组飞书凭证 | **机器人列表** CRUD + 角色说明 |
 | Agent 工具 | 单渠道 `channel=feishu` | 工具调用需带 **bot 上下文**（写记忆时不串 bot） |
@@ -47,28 +48,29 @@
 | **服务实例** | 一个 `python run.py` 进程（本规划默认单实例） |
 | **Bot / 角色** | 飞书开放平台上的一个自建应用 + DiaryMaster 内一条配置（`bot_id`） |
 | **bot_id** | 本机稳定标识，如 `writer`、`reviewer`（与飞书 `app_id` 一一对应） |
-| **共享层** | `workspace/`、DeepSeek API Key、可选全局 UI 主题 |
-| **隔离层** | 各 bot 的 Session、bindings、USER/MEMORY、role prompt、活动日志 |
+| **共享层** | DeepSeek API Key、可选全局 UI 主题（实例级） |
+| **隔离层** | 各 Agent 的 Session、bindings、USER/MEMORY、**workspace**、role prompt |
 
-### 3.2 隔离 vs 共享（原则）
+### 3.2 隔离原则（2026-05-26 更新：workspace 亦隔离）
 
 ```
                     ┌─────────────────────────────────────┐
                     │         DiaryMaster 服务             │
+                    │  （全局：API Key、UI 主题）           │
                     └─────────────────────────────────────┘
-         隔离                    │                    共享
-  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐
-  │ Bot A 记忆   │    │ Bot B 记忆   │    │  workspace/      │
-  │ Bot A Session│    │ Bot B Session│    │  （日记 .md 等）  │
-  │ Bot A 人设   │    │ Bot B 人设   │    │                  │
-  └──────────────┘    └──────────────┘    │  API Key（可选   │
-                                          │  每 bot 独立模型）│
-                                          └──────────────────┘
+         完全隔离 per Agent
+  ┌──────────────┐    ┌──────────────┐
+  │ Agent A      │    │ Agent B      │
+  │ · workspace  │    │ · workspace  │
+  │ · 记忆       │    │ · 记忆       │
+  │ · Session    │    │ · Session    │
+  │ · 飞书 App A │    │ · 飞书 App B │
+  └──────────────┘    └──────────────┘
 ```
 
-**刻意共享**：日记文件、目录树、用户在本机编辑的内容——任意 bot 的 Agent 工具（`read_file` / `edit_file`）操作同一棵树。
+**刻意隔离**：日记、记忆、对话——避免多人共用一实例时互相读写。
 
-**刻意隔离**：跨会话偏好、与某角色相关的 MEMORY、对话历史——避免「教练 bot 的记忆」污染「写作 bot」。
+**刻意共享（实例级）**：模型 API Key、部署配置；**不共享**日记目录。
 
 **边界 case（产品需定）**：
 
@@ -81,46 +83,19 @@
 
 ```text
 data/
-  user_settings.json          # 全局 API Key、ui_theme；feishu 块逐步废弃或仅作迁移
-  workspace/                  # 不变（仓库内 workspace/ 或 config 指定）
-
-  feishu/
-    bots.json                 # bot 注册表：[{ bot_id, app_id, name, role_prompt, enabled, ... }]
-    bots/
-      writer/
-        bindings.json         # open_id → active_session_id（仅该 bot）
-        config.json           # reply_display、card_backend 等（已有 channel 配置可迁入）
-        activity.json
-      reviewer/
+  user_settings.json          # 全局 API Key、ui_theme
+  agents/
+    registry.json
+    {agent_id}/
+      workspace/              # 该 Agent 独占日记树
+      memories/
+      sessions/
+      feishu/
         bindings.json
         config.json
-        ...
-
-  memories/
-    web/                      # Web 渠道（若独立）
-      USER.md
-      MEMORY.md
-    writer/
-      USER.md
-      MEMORY.md
-    reviewer/
-      ...
-
-  sessions/
-    writer/
-      <session_id>.json
-    reviewer/
-      ...
-    web/
-      ...
-
-  active_session/
-    web.txt                   # 各 bot 当前 active session id（替代单一 active_session.txt）
-    writer.txt
-    reviewer.txt
 ```
 
-**迁移**：现有无 bot 前缀的数据 → 默认迁入 `bot_id=default` 或 `main`，保证升级不丢对话。
+**迁移**：现有根目录 `workspace/` → `data/agents/default/workspace/`。
 
 ---
 
@@ -164,7 +139,7 @@ on im.message.receive_v1:
 
 - `_chat_channel` 扩展为 `(channel, bot_id)` 或 `ChatContext` 小对象。
 - `memory` 工具：写入 **当前 bot** 的 USER/MEMORY，不可跨 bot 读除非显式加「全局记忆」产品（**不做**）。
-- `read_file` / `edit_file`：**不**带 bot 前缀，始终 `workspace/`。
+- `read_file` / `edit_file`：路径相对于 **`data/agents/{agent_id}/workspace/`**（与 agent-management §6 一致）。
 - 危险工具策略：可按 `bot_id` 配置（如某角色只读日记、不允许 `delete_path`）。
 
 ### 5.4 Web UI
@@ -208,7 +183,7 @@ on im.message.receive_v1:
 | M1-4 | `bind.py` 路径改为 `bots/{bot_id}/bindings.json` | 待办 |
 | M1-5 | `chat_once` / Agent 缓存键含 `bot_id` + role_prompt | 待办 |
 | M1-6 | 设置页：第二 bot 凭证 + 角色名 + 简短人设 | 待办 |
-| M1-7 | 验收：两 App 私聊各记不同 MEMORY，同读 `workspace/日记.md` | 待办 |
+| M1-7 | 验收：两 App 私聊各记不同 MEMORY，**各自 workspace 互不可见** | 待办 |
 
 ### 阶段 M2 — 体验与运维（1～2 天）
 
@@ -230,9 +205,9 @@ on im.message.receive_v1:
 ## 8. 非目标（首版多 bot 不做）
 
 - 多 **DiaryMaster 进程** 水平扩展（本规划仅单进程多 App）
-- 多用户 SaaS（仍为本机单用户；`open_id` 隔离仅防串线）
-- 每 bot 独立 `workspace/`（与「共享日记」冲突）
-- 飞书一个 App 内多个「虚拟角色」（应用层无法靠 app_id 区分，必须多 App）
+- 云端多租户 SaaS、账号体系与计费（单机多人 = 多个 Agent，无登录亦可先用）
+- 跨 Agent **共享** 同一本日记（见 agent-management §6）
+- 飞书一个 App 内多个「虚拟角色」（必须多 App 才能区分租户）
 
 ---
 
@@ -240,7 +215,7 @@ on im.message.receive_v1:
 
 | 风险 | 说明 | 缓解 |
 | ---- | ---- | ---- |
-| 并发写同一日记文件 | 两 bot 同时 `edit_file` 同一 path | 沿用 workspace 锁；飞书侧 per-user 锁升级为 per-bot+user |
+| 并发写文件 | 同一 Agent 内 workspace 锁 | 沿用现有锁；**不再跨 Agent 争用同一文件** |
 | Agent 缓存 | `_agent_cache` 键需含 bot + role_prompt | M1-5 一并改 |
 | 全局 `store.active_id` | 多 bot 并发 switch 互抢 | SessionStore 改为 **按 bot 维护 active**，或 dispatch 内局部 context 不依赖全局 |
 | 飞书后台 | 每个角色需单独建应用、开权限、长连接 | 设置页文档化 checklist |
@@ -253,7 +228,7 @@ on im.message.receive_v1:
 - [ ] 配置两个飞书 App，服务同时维持两条 WS，日志可区分 bot 名。
 - [ ] 用户分别私聊 bot A / B：对话历史互不可见（不同 Session 文件）。
 - [ ] 在 A 的 MEMORY 写入「称呼老板」；B 的 MEMORY 无此项；B 对话中 Agent 不应假定该偏好。
-- [ ] A 或 B 执行「读取 workspace 某日记」得到 **相同文件内容**；A 修改后 B 再读可见更新。
+- [ ] A 在 workspace 写 `日记.md`，B **读不到**；B 的文件树无 A 的文件。
 - [ ] Web 设置页可禁用某一 bot，禁用后不再收消息且 WS 断开。
 - [ ] 升级旧数据后，原单 bot 对话与记忆仍在 `default`（或 `main`）下可用。
 
@@ -281,4 +256,4 @@ on im.message.receive_v1:
 | 日期 | 说明 |
 | ---- | ---- |
 | 2026-05-26 | 初版：单服务多飞书 App、记忆/Session 按 bot 隔离、workspace 共享；分 M0～M3 阶段 |
-| 2026-05-26 | 对齐 agent-management：bot_id ≡ agent_id；Web 用 Agent 注册表而非 web 虚拟 bot |
+| 2026-05-26 | 对齐 agent-management：**workspace 按 Agent 隔离**，支持单机多人 |
