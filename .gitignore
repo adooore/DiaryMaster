@@ -1,7 +1,4 @@
-# 个人笔记工作区（仅本机，勿提交）
-workspace/
-
-# Session、对话与变更记录
+# Session、对话、Agent 与私人笔记
 data/
 
 # 密钥与环境

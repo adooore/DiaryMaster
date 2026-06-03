@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=52" />
+  <link rel="stylesheet" href="/static/style.css?v=54" />
 </head>
 <body>
   <header class="topbar">
@@ -215,7 +215,7 @@
                       </div>
                       <div class="settings-field-group settings-field-group--full">
                         <label class="settings-label" for="settings-agent-role">人设</label>
-                        <textarea id="settings-agent-role" class="settings-textarea settings-textarea-sm" rows="2" placeholder="角色说明，可留空"></textarea>
+                        <textarea id="settings-agent-role" class="settings-textarea settings-textarea-sm" rows="3" placeholder="角色说明，可留空"></textarea>
                       </div>
                       <div class="settings-field-group">
                         <label class="settings-label" for="settings-agent-workspace-mode">工作区</label>
@@ -226,9 +226,9 @@
                       </div>
                       <div class="settings-field-group" id="settings-agent-workspace-ref-wrap">
                         <label class="settings-label" for="settings-agent-workspace-ref">共用目标</label>
-                        <input type="text" id="settings-agent-workspace-ref" class="settings-input" placeholder="legacy" />
+                        <input type="text" id="settings-agent-workspace-ref" class="settings-input" placeholder="default" />
                       </div>
-                      <div class="settings-field-group">
+                      <div class="settings-field-group settings-field-group--full settings-field-group--api">
                         <label class="settings-label" for="settings-agent-api-key">API Key</label>
                         <input type="password" id="settings-agent-api-key" class="settings-input" autocomplete="off" spellcheck="false" placeholder="留空用实例 Key" />
                         <p id="settings-agent-api-key-hint" class="settings-hint settings-hint-compact"></p>
@@ -277,15 +277,15 @@
                   </section>
                   <section class="settings-agent-form-section">
                     <h4 class="settings-agent-form-section-title">记忆</h4>
-                    <div class="settings-agent-form-grid settings-agent-form-grid--mem">
+                    <div class="settings-agent-mem-stack">
                       <div class="settings-field-group">
                         <label class="settings-label" for="settings-memory-user">USER</label>
-                        <textarea id="settings-memory-user" class="settings-textarea" rows="5" spellcheck="false" placeholder="用户偏好…"></textarea>
+                        <textarea id="settings-memory-user" class="settings-textarea settings-textarea--mem" rows="8" spellcheck="false" placeholder="用户偏好…"></textarea>
                         <span id="settings-memory-user-usage" class="settings-usage-inline"></span>
                       </div>
                       <div class="settings-field-group">
                         <label class="settings-label" for="settings-memory-memory">MEMORY</label>
-                        <textarea id="settings-memory-memory" class="settings-textarea" rows="5" spellcheck="false" placeholder="工作区约定…"></textarea>
+                        <textarea id="settings-memory-memory" class="settings-textarea settings-textarea--mem" rows="8" spellcheck="false" placeholder="工作区约定…"></textarea>
                         <span id="settings-memory-memory-usage" class="settings-usage-inline"></span>
                       </div>
                     </div>
@@ -351,6 +351,6 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
-  <script src="/static/app.js?v=54"></script>
+  <script src="/static/app.js?v=55"></script>
 </body>
 </html>

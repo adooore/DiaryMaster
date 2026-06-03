@@ -27,8 +27,7 @@ class AgentProfile:
     api_key: str | None = None
     api_provider: str | None = "deepseek"
     workspace_mode: str = "dedicated"  # dedicated | shared
-    workspace_path: str | None = None
-    shared_workspace_ref: str | None = None  # legacy | 其他 agent_id
+    shared_workspace_ref: str | None = None  # shared 时指向另一 agent_id
     feishu_app_id: str | None = None
     feishu_app_secret: str | None = None
     icon: str | None = None

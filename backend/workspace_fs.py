@@ -10,7 +10,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from backend.config import WORKSPACE
+from backend.agents.workspace import dedicated_workspace_dir
+from backend.agents.profile import DEFAULT_AGENT_ID
 
 
 class WorkspaceError(ValueError):
@@ -24,7 +25,7 @@ def _workspace_root() -> Path:
 
         return get_workspace_root()
     except Exception:
-        return WORKSPACE
+        return dedicated_workspace_dir(DEFAULT_AGENT_ID)
 
 
 def _normalize_rel(relative_path: str) -> str:

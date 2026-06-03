@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.config import APP_ROOT, WORKSPACE
+from backend.config import APP_ROOT
 
 from backend.agents.profile import AgentProfile, DEFAULT_AGENT_ID
 
@@ -27,27 +27,15 @@ def resolve_workspace_root(profile: AgentProfile) -> Path:
     """根据 AgentProfile 的工作区配置解析根路径。"""
     mode = (profile.workspace_mode or "dedicated").strip().lower()
     if mode == "shared":
-        ref = (profile.shared_workspace_ref or "legacy").strip()
-        if ref == "legacy":
-            return WORKSPACE
-        if ref == DEFAULT_AGENT_ID or ref:
-            from backend.agents.registry import agent_registry
+        ref = (profile.shared_workspace_ref or "").strip()
+        if not ref:
+            raise ValueError(
+                f"Agent {profile.agent_id} 为共用工作区但未配置 shared_workspace_ref"
+            )
+        from backend.agents.registry import agent_registry
 
-            try:
-                other = agent_registry.get_profile(ref)
-            except KeyError:
-                return WORKSPACE
-            if (other.workspace_mode or "").lower() == "shared" and other.shared_workspace_ref == ref:
-                return WORKSPACE
-            return dedicated_workspace_dir(other.agent_id)
-        return WORKSPACE
-
-    custom = (profile.workspace_path or "").strip()
-    if custom:
-        path = Path(custom)
-        if path.is_absolute():
-            return path
-        return (APP_ROOT / custom).resolve()
+        other = agent_registry.get_profile(ref)
+        return dedicated_workspace_dir(other.agent_id)
 
     return dedicated_workspace_dir(profile.agent_id)
 

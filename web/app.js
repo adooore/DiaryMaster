@@ -2886,6 +2886,136 @@ async function afterChatDone(data) {
   }
 }
 
+const CHAT_SLASH_HELP = `可用指令：
+/help · 本帮助
+/sessions · 列出会话（★ 为当前）
+/new · 新建会话
+/switch <序号或id> · 切换会话
+/current · 当前会话`;
+
+/** 解析聊天框行首 `/` 指令。 */
+function parseChatSlashCommand(text) {
+  const raw = String(text || "").trim();
+  if (!raw.startsWith("/")) return null;
+  const body = raw.slice(1).trim();
+  if (!body) return ["help", ""];
+  const space = body.indexOf(" ");
+  if (space === -1) return [body.toLowerCase(), ""];
+  return [body.slice(0, space).toLowerCase(), body.slice(space + 1).trim()];
+}
+
+function normalizeChatSlashCmd(cmd) {
+  const aliases = {
+    帮助: "help",
+    会话: "sessions",
+    列表: "sessions",
+    新建: "new",
+    切换: "switch",
+    当前: "current",
+  };
+  return aliases[cmd] || cmd;
+}
+
+/** 按序号、完整 id 或前缀解析 Session id（Web /switch）。 */
+function resolveSessionTargetFromList(token, sessions) {
+  const needle = String(token || "").trim();
+  if (!needle) throw new Error("请提供 Session id 或序号，例如 /switch 2");
+  if (/^\d+$/.test(needle)) {
+    const idx = parseInt(needle, 10);
+    if (idx < 1 || idx > sessions.length) {
+      throw new Error(`序号无效：${idx}（共 ${sessions.length} 个会话）`);
+    }
+    return sessions[idx - 1].id;
+  }
+  const exact = sessions.find((s) => s.id === needle);
+  if (exact) return exact.id;
+  const matches = sessions.filter((s) => s.id.startsWith(needle));
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    throw new Error(`前缀「${needle}」匹配到多个 Session，请写更完整的 id`);
+  }
+  throw new Error(`找不到 Session：${needle}`);
+}
+
+/** 处理 Web 聊天框 `/` 指令；已处理返回 true。 */
+async function tryHandleChatSlashCommand(message) {
+  const parsed = parseChatSlashCommand(message);
+  if (!parsed) return false;
+
+  const cmd = normalizeChatSlashCmd(parsed[0]);
+  const args = parsed[1];
+  const turn = nextChatTurn();
+  pushMessage("user", message, turn);
+  renderChat();
+
+  const reply = async (text) => {
+    pushMessage("assistant", text, turn);
+    renderChat();
+  };
+
+  try {
+    if (cmd === "help") {
+      await reply(CHAT_SLASH_HELP);
+      return true;
+    }
+    if (cmd === "new") {
+      await newSession();
+      await reply(`已新建会话：${sessionId || ""}\n下一条消息将在此会话中继续。`);
+      return true;
+    }
+    if (cmd === "current") {
+      const res = await fetch("/api/session");
+      if (!res.ok) throw new Error("读取当前会话失败");
+      const data = await res.json();
+      await reply(
+        `当前会话：${data.id || sessionId}\n标题：${data.title || data.id}\n轮次：${data.turn ?? 0}`
+      );
+      return true;
+    }
+    if (cmd === "sessions") {
+      const res = await fetch("/api/sessions");
+      if (!res.ok) throw new Error("读取会话列表失败");
+      const data = await res.json();
+      const sessions = data.sessions || [];
+      const activeId = data.active_id || sessionId;
+      if (!sessions.length) {
+        await reply("暂无会话。发送 /new 新建。");
+        return true;
+      }
+      const lines = sessions.slice(0, 15).map((s, i) => {
+        const mark = s.id === activeId ? "★" : " ";
+        return `${mark} [${i + 1}] ${s.id} | ${s.title || s.id} | turn=${s.turn ?? 0}`;
+      });
+      lines.push(
+        sessions.length > 15
+          ? `… 共 ${sessions.length} 个会话（仅展示前 15 个）`
+          : `共 ${sessions.length} 个会话`
+      );
+      lines.push("切换：/switch 2 或 /switch <id前缀>");
+      await reply(lines.join("\n"));
+      return true;
+    }
+    if (cmd === "switch") {
+      if (!args) {
+        await reply("用法：/switch <序号> 或 /switch <Session id 前缀>");
+        return true;
+      }
+      const listRes = await fetch("/api/sessions");
+      if (!listRes.ok) throw new Error("读取会话列表失败");
+      const listData = await listRes.json();
+      const targetId = resolveSessionTargetFromList(args, listData.sessions || []);
+      await activateSession(targetId);
+      await reply(`已切换到：${sessionId}`);
+      return true;
+    }
+    await reply("未知指令，发送 /help 查看帮助。");
+    return true;
+  } catch (err) {
+    await reply(String(err.message || err));
+    return true;
+  }
+}
+
 chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const message = chatInput.value.trim();
@@ -2893,6 +3023,12 @@ chatForm.addEventListener("submit", async (e) => {
 
   chatInput.value = "";
   btnSend.disabled = true;
+
+  if (await tryHandleChatSlashCommand(message)) {
+    btnSend.disabled = false;
+    return;
+  }
+
   const pendingTurn = nextChatTurn();
   pushMessage("user", message, pendingTurn);
 
@@ -3174,7 +3310,7 @@ async function showAgentEditor(agentId) {
       settingsAgentWorkspaceModeSelect.value = agent?.workspace_mode || "dedicated";
     }
     if (settingsAgentWorkspaceRefInput) {
-      settingsAgentWorkspaceRefInput.value = agent?.shared_workspace_ref || "legacy";
+      settingsAgentWorkspaceRefInput.value = agent?.shared_workspace_ref || "default";
     }
     if (settingsAgentApiKeyInput) settingsAgentApiKeyInput.value = "";
     if (settingsAgentApiKeyHint) {
@@ -3206,7 +3342,7 @@ async function showAgentEditor(agentId) {
     if (settingsAgentNameInput) settingsAgentNameInput.value = "";
     if (settingsAgentRoleInput) settingsAgentRoleInput.value = "";
     if (settingsAgentWorkspaceModeSelect) settingsAgentWorkspaceModeSelect.value = "dedicated";
-    if (settingsAgentWorkspaceRefInput) settingsAgentWorkspaceRefInput.value = "legacy";
+    if (settingsAgentWorkspaceRefInput) settingsAgentWorkspaceRefInput.value = "default";
     if (settingsAgentApiKeyInput) settingsAgentApiKeyInput.value = "";
     if (settingsAgentApiKeyHint) settingsAgentApiKeyHint.textContent = "";
     if (settingsAgentIdHint) settingsAgentIdHint.textContent = "";
@@ -3371,6 +3507,7 @@ function setSettingsTab(tabId) {
     panel.hidden = !on;
   });
   settingsPanelEl?.classList.toggle("settings-panel--wide", id === "agents");
+  settingsPanelEl?.classList.toggle("settings-panel--agents-tab", id === "agents");
   settingsForm?.classList.toggle("settings-form--agents", id === "agents");
 }
 

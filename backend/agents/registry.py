@@ -1,4 +1,4 @@
-"""Agent 注册表：CRUD、迁移、active 切换。"""
+"""Agent 注册表：CRUD 与 active 切换。"""
 
 from __future__ import annotations
 
@@ -24,17 +24,13 @@ from backend.agents.workspace import dedicated_workspace_dir, ensure_workspace_d
 
 AGENTS_DIR = APP_ROOT / "data" / "agents"
 REGISTRY_PATH = AGENTS_DIR / "registry.json"
-LEGACY_SESSIONS_DIR = APP_ROOT / "data" / "sessions"
-LEGACY_MEMORIES_DIR = APP_ROOT / "data" / "memories"
-LEGACY_ACTIVE_SESSION = APP_ROOT / "data" / "active_session.txt"
-LEGACY_FEISHU_DIR = APP_ROOT / "data" / "feishu"
 
 
 class AgentRegistry:
     """读写 data/agents/registry.json 与 Agent 元数据。"""
 
     def __init__(self) -> None:
-        """加载注册表；若不存在则执行一次性迁移。"""
+        """加载注册表；若不存在则初始化 default Agent。"""
         self._lock = threading.RLock()
         self._agents: dict[str, AgentProfile] = {}
         self._active_agent_id: str = DEFAULT_AGENT_ID
@@ -42,8 +38,7 @@ class AgentRegistry:
         if REGISTRY_PATH.is_file():
             self._load_registry()
         else:
-            self._migrate_legacy()
-        self._migrate_legacy_feishu()
+            self._init_default_agent()
 
     @property
     def active_agent_id(self) -> str:
@@ -157,8 +152,11 @@ class AgentRegistry:
         mode = (workspace_mode or "dedicated").strip().lower()
         if mode not in ("dedicated", "shared"):
             raise ValueError("workspace_mode 须为 dedicated 或 shared")
-        if mode == "shared" and not (shared_workspace_ref or "").strip():
-            shared_workspace_ref = "legacy"
+        ws_ref = (shared_workspace_ref or "").strip() or None
+        if mode == "shared":
+            if not ws_ref:
+                raise ValueError("共用工作区须指定 shared_workspace_ref（目标 Agent id）")
+            self.get_profile(ws_ref)
 
         feishu_id = (feishu_app_id or "").strip() or None
         feishu_secret = (feishu_app_secret or "").strip() or None
@@ -175,7 +173,7 @@ class AgentRegistry:
             feishu_app_id=feishu_id,
             feishu_app_secret=feishu_secret,
             workspace_mode=mode,
-            shared_workspace_ref=(shared_workspace_ref or "").strip() or None,
+            shared_workspace_ref=ws_ref,
             sort_order=len(self._agents),
         )
 
@@ -230,6 +228,10 @@ class AgentRegistry:
             profile.workspace_mode = mode
         if shared_workspace_ref is not None:
             profile.shared_workspace_ref = shared_workspace_ref.strip() or None
+        if profile.workspace_mode == "shared" and not (profile.shared_workspace_ref or "").strip():
+            raise ValueError("共用工作区须指定 shared_workspace_ref（目标 Agent id）")
+        if profile.workspace_mode == "shared":
+            self.get_profile(profile.shared_workspace_ref or "")
         if clear_api_key:
             profile.api_key = None
         elif api_key is not None and api_key.strip():
@@ -400,37 +402,24 @@ class AgentRegistry:
             encoding="utf-8",
         )
 
-    def _migrate_legacy(self) -> None:
-        """首次升级：创建 default Agent 并迁入旧数据。"""
-        default_dir = self.agent_dir(DEFAULT_AGENT_ID)
-        sessions_dst = default_dir / "sessions"
-        memories_dst = default_dir / "memories"
-        sessions_dst.mkdir(parents=True, exist_ok=True)
-        memories_dst.mkdir(parents=True, exist_ok=True)
-
-        if LEGACY_SESSIONS_DIR.is_dir():
-            for path in LEGACY_SESSIONS_DIR.glob("*.json"):
-                shutil.move(str(path), str(sessions_dst / path.name))
-        if LEGACY_ACTIVE_SESSION.is_file():
-            shutil.move(str(LEGACY_ACTIVE_SESSION), str(sessions_dst / "active_session.txt"))
-
-        if LEGACY_MEMORIES_DIR.is_dir():
-            for path in LEGACY_MEMORIES_DIR.iterdir():
-                if path.is_file():
-                    shutil.move(str(path), str(memories_dst / path.name))
-
+    def _init_default_agent(self) -> None:
+        """首次启动：创建 default Agent 及目录结构。"""
         profile = AgentProfile(
             agent_id=DEFAULT_AGENT_ID,
             display_name="默认",
-            description="自旧版迁移的单用户 Agent",
+            description="",
             created_at=now_iso(),
             updated_at=now_iso(),
-            workspace_mode="shared",
-            shared_workspace_ref="legacy",
+            workspace_mode="dedicated",
             sort_order=0,
         )
         self._agents = {DEFAULT_AGENT_ID: profile}
         self._active_agent_id = DEFAULT_AGENT_ID
+        self.agent_dir(DEFAULT_AGENT_ID).mkdir(parents=True, exist_ok=True)
+        self.sessions_dir(DEFAULT_AGENT_ID)
+        self.memories_dir(DEFAULT_AGENT_ID)
+        self.feishu_dir(DEFAULT_AGENT_ID)
+        dedicated_workspace_dir(DEFAULT_AGENT_ID).mkdir(parents=True, exist_ok=True)
         self._write_meta(profile)
         self._save_registry()
 
@@ -466,47 +455,6 @@ class AgentRegistry:
             restart_feishu_ws_clients(force=True)
         except ImportError:
             pass
-
-    def _migrate_legacy_feishu(self) -> None:
-        """将全局 data/feishu 与 user_settings 飞书凭证迁入 default Agent。"""
-        default = self._agents.get(DEFAULT_AGENT_ID)
-        if not default:
-            return
-
-        changed = False
-        feishu_dst = self.feishu_dir(DEFAULT_AGENT_ID)
-
-        if LEGACY_FEISHU_DIR.is_dir():
-            for name in ("bindings.json", "config.json", "processed.json", "activity.json"):
-                src = LEGACY_FEISHU_DIR / name
-                dst = feishu_dst / name
-                if src.is_file() and not dst.is_file():
-                    shutil.move(str(src), str(dst))
-                    changed = True
-
-        if not (default.feishu_app_id or "").strip():
-            from backend.user_settings import load_settings
-
-            block = load_settings().get("feishu") or {}
-            if isinstance(block, dict):
-                app_id = (block.get("app_id") or "").strip()
-                app_secret = (block.get("app_secret") or "").strip()
-                if app_id and app_secret:
-                    default.feishu_app_id = app_id
-                    default.feishu_app_secret = app_secret
-                    changed = True
-
-        if changed:
-            default.updated_at = now_iso()
-            self._write_meta(default)
-            self._save_registry()
-
-        from backend.user_settings import load_settings, save_settings
-
-        data = load_settings()
-        if isinstance(data.get("feishu"), dict):
-            data.pop("feishu", None)
-            save_settings(data)
 
 
 def _valid_id(candidate: str) -> bool:

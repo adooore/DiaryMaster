@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parent.parent
-WORKSPACE = APP_ROOT / "workspace"
 WEB_DIR = APP_ROOT / "web"
 
 ENV_API_KEY = "DEEPSEEK_API_KEY"

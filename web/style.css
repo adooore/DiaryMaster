@@ -385,15 +385,11 @@ body {
 
 .settings-panel--wide {
   width: min(1380px, 98vw);
-  max-height: min(94vh, 920px);
+  max-height: min(96vh, 940px);
 }
 
-.settings-form--agents {
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+.settings-panel--agents-tab .settings-footer {
+  display: none;
 }
 
 .settings-tab-panel[data-settings-panel="agents"].is-active {
@@ -401,21 +397,22 @@ body {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .settings-agent-shell {
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
   flex: 1;
-  min-height: min(72vh, 680px);
-  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .settings-agent-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 10px;
+  gap: 10px;
+  padding: 16px 12px;
   min-height: 0;
   border-right: 1px solid var(--border);
   background: var(--bg-main);
@@ -473,6 +470,7 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   background: var(--popover-bg);
 }
 
@@ -510,46 +508,62 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px 24px;
+  padding: 24px 32px 32px;
 }
 
 .settings-agent-form-section {
-  padding: 12px 0;
+  padding: 0;
 }
 
 .settings-agent-form-section + .settings-agent-form-section {
+  margin-top: 8px;
+  padding-top: 24px;
   border-top: 1px solid var(--border);
 }
 
 .settings-agent-form-section-title {
-  margin: 0 0 10px;
-  font-size: 11px;
+  margin: 0 0 16px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
 }
 
 .settings-agent-form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px 20px;
+  gap: 18px 28px;
 }
 
 .settings-agent-form-grid--basic {
   grid-template-columns: 1fr 1fr;
 }
 
+.settings-agent-form-grid .settings-field-group {
+  margin-bottom: 0;
+}
+
 .settings-field-group--full {
   grid-column: 1 / -1;
 }
 
-.settings-agent-form-grid--mem {
-  grid-template-columns: 1fr 1fr;
-  gap: 12px 24px;
+.settings-agent-mem-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.settings-agent-mem-stack .settings-field-group {
+  margin-bottom: 0;
+}
+
+.settings-textarea--mem {
+  min-height: 160px;
+  resize: vertical;
 }
 
 .settings-id-hint {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-size: 11px;
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   color: var(--text-muted);
@@ -560,7 +574,7 @@ body {
 }
 
 .settings-hint-compact {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 11px;
   min-height: 0;
 }
@@ -573,8 +587,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-top: 8px;
+  gap: 16px;
+  margin-top: 16px;
   flex-wrap: wrap;
 }
 
@@ -585,15 +599,16 @@ body {
 }
 
 .settings-agent-advanced {
-  margin-top: 8px;
+  margin-top: 16px;
 }
 
 .settings-agent-advanced-summary {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   cursor: pointer;
   user-select: none;
   list-style: none;
+  padding: 4px 0;
 }
 
 .settings-agent-advanced-summary::-webkit-details-marker {
@@ -601,7 +616,7 @@ body {
 }
 
 .settings-agent-advanced-body {
-  margin-top: 10px;
+  margin-top: 14px;
 }
 
 .settings-inline-actions--compact {
@@ -634,8 +649,8 @@ body {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 24px;
+  gap: 14px;
+  padding: 16px 32px;
   border-top: 1px solid var(--border);
   background: var(--bg-main);
 }
@@ -643,18 +658,19 @@ body {
 .settings-agent-workspace-foot-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-left: auto;
 }
 
 .settings-textarea-sm {
-  min-height: 64px;
+  min-height: 88px;
+  resize: vertical;
 }
 
 @media (max-width: 960px) {
   .settings-agent-shell {
     grid-template-columns: 1fr;
-    min-height: min(82vh, 760px);
+    min-height: 0;
   }
 
   .settings-agent-sidebar {
@@ -664,8 +680,7 @@ body {
   }
 
   .settings-agent-form-grid,
-  .settings-agent-form-grid--basic,
-  .settings-agent-form-grid--mem {
+  .settings-agent-form-grid--basic {
     grid-template-columns: 1fr;
   }
 
@@ -2614,6 +2629,13 @@ body.layout-resizing .resize-handle.dragging::after {
   min-height: 0;
   overflow: auto;
   padding: 18px 20px;
+}
+
+.settings-form.settings-form--agents {
+  overflow: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-tab-panel {

@@ -283,8 +283,18 @@ def _process_message(
 ) -> None:
     """绑定 Session、调用 chat_once（步骤更新同一条飞书卡片）、最终 PATCH 回复。"""
     from backend.agents.context import set_active_agent_id
+    from backend.channels.feishu.slash import try_handle_slash_command
 
     set_active_agent_id(agent_id)
+
+    slash_reply = try_handle_slash_command(
+        text=text,
+        agent_id=agent_id,
+        open_id=open_id,
+    )
+    if slash_reply is not None:
+        send_text(receive_id, receive_id_type, slash_reply, agent_id=agent_id)
+        return
 
     if not get_api_key(agent_id):
         send_text(
