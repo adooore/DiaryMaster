@@ -13,7 +13,7 @@
 - **三栏布局**：左侧文件树、中间编辑/对比、右侧 Agent 对话。
 - **编辑 / 变更**：中间栏可手动改 Markdown；Agent 或手动保存后可查看行级 diff（绿增红删）。
 - **多 Agent**：对话栏 **Agent · 名称 ▾** 切换；设置页可创建 / 编辑 / 删除 Agent，配置角色提示、工作区、记忆与飞书。
-- **多 Session**：每个 Agent 有独立 Session 库；支持切换、新建、**重命名**；首轮对话结束后由 AI **自动生成会话标题**。
+- **多 Session**：每个 Agent 有独立 Session 库；支持切换、新建（含 `/new` 指令）、**重命名**；首轮对话结束后由 AI **自动生成会话标题**。
 - **模型与思考**：输入框底栏可选 **V4 Flash / V4 Pro** 与**思考模式**（偏好存浏览器，不绑 Session）；开启思考时流式展示思考链。
 - **上下文圆环**：底栏显示当前模型上下文占用（优先 API `prompt_tokens`，无数据时字符估算）。
 - **主题**：设置页可选浅色 / 深色（存本机与 `user_settings`）。
@@ -35,15 +35,25 @@
 
 - 每个 Agent 可配置独立 **App ID / App Secret**（设置页 → Agent → 飞书）。
 - **长连接**收私聊消息 → 跑一轮 Agent → 同一条卡片消息 PATCH 更新进度与最终回复。
-- 飞书用户与 Session **一对一绑定**（`open_id` → `session_id`）；换 Agent 后绑定数据按 Agent 隔离。
+- 飞书用户与 Session **一对一绑定**（`open_id` → `session_id`，存于 `data/agents/{id}/feishu/bindings.json`）；换 Agent 后绑定数据按 Agent 隔离。
+- 飞书私聊与 Web 聊天框均支持 **`/` 指令**管理 Session（不调用 Agent，即时回复）：
+
+| 指令 | 别名 | 作用 |
+| ---- | ---- | ---- |
+| `/help` | `/帮助` | 列出可用指令 |
+| `/sessions` | `/会话` `/列表` | 列出会话（★ 为当前） |
+| `/new` | `/新建` | 新建会话并切换过去 |
+| `/switch` | `/切换` | 切换会话，如 `/switch 2` 或 `/switch abc12345` |
+| `/current` | `/当前` | 查看当前会话 id、标题、轮次 |
+
 - 飞书渠道**不支持**危险删除类工具；请在浏览器中操作。
 - 保存飞书配置或检测通过后，可调用 `POST /api/feishu/restart-ws` 重连长连接。
 
 ### 文件与数据
 
-- 笔记为各 Agent 工作区下的 `.md` 文件，统一存放在 `data/agents/{id}/workspace/`（多个 Agent 也可配置共用同一目录）。
-- Session、对话、变更、记忆、飞书绑定在 `data/agents/`（本地 JSON，已加入 `.gitignore`）。
-- 首次升级会自动把旧版 `data/sessions/`、`data/memories/` 迁移到 `default` Agent。
+- 笔记为各 Agent 工作区下的 `.md` 文件，默认在 `data/agents/{id}/workspace/`。
+- 多个 Agent 可在设置里配置**共用**另一 Agent 的工作区（填写目标 Agent id，如 `default`）；Session 与记忆仍各自独立。
+- Session、对话、变更、记忆、飞书绑定均在 `data/` 下（本地 JSON，已加入 `.gitignore`）。
 
 ---
 
@@ -118,8 +128,6 @@ python -c "from backend.config import get_api_key; print('OK' if get_api_key() e
 3. 启动 `python run.py` 后，在设置页使用 **检测**；必要时点 **重启长连接**。
 4. 飞书私聊机器人发消息测试；Web 端打开该用户绑定的 Session 可看到同步步骤。
 
-详细任务与路线图见 `plan/` 目录。
-
 ### 5. 准备工作区（首次）
 
 启动后会自动创建 Agent 工作区。也可手动在 `data/agents/default/workspace/` 放入 `.md` 日记。
@@ -182,33 +190,51 @@ taskkill /PID <PID> /F
 ### 4. 多 Agent
 
 - **切换**：对话栏 Agent 下拉，或设置页点选 Agent 后 **切换到此**。
-- **新建**：设置 → Agent → **+ 新建**，可设名称、角色提示、工作区（独立 / 共用另一 Agent 的目录）、记忆、飞书、专属 API Key。
-- **数据隔离**：Session、记忆、飞书绑定按 Agent 分开；工作区可配置为共用。
+- **新建**：设置 → Agent → **+ 新建**，可设名称、角色提示、工作区、记忆、飞书、专属 API Key。
+- **工作区**：
+  - **独立**（默认）：`data/agents/{id}/workspace/`
+  - **共用**：填写另一 Agent 的 id（如 `default`），与该 Agent 读写同一批日记文件
+- **数据隔离**：Session、记忆、飞书绑定按 Agent 分开；仅工作区可按需共用。
 
-### 5. 模型、思考与上下文
+### 5. Session 与 `/` 指令
+
+除顶栏 **+ 新建 Session** 外，可在 **Web 聊天框** 或 **飞书私聊** 直接发送：
+
+```text
+/new          # 新建会话并切换（下一条消息进入新 Session）
+/sessions     # 查看列表
+/switch 2     # 切换到列表第 2 个
+/current      # 查看当前会话
+/help         # 指令帮助
+```
+
+飞书侧按 `open_id` 记住当前 Session；Web 侧改的是当前 Agent 的全局 active Session。
+
+### 6. 模型、思考与上下文
 
 - **模型**：底栏 `V4 Flash` / `V4 Pro`（存 `localStorage`）。
 - **思考**：勾选后流式展示思考过程；关闭则不展示思考链。
 - **上下文圆环**：悬停查看 tokens；标注 **API 计量** 或 **字符估算**。
 
-### 6. Session 与标题
+### 7. Session 标题与重命名
 
 - **新建 Session**：在当前 Agent 内开始新对话。
 - **重命名**：顶栏 **重命名**；手动命名后不再被自动标题覆盖。
 - **自动标题**：每个 Session **第一轮**结束后额外生成简短会话名。
 
-### 7. 撤销与回退
+### 8. 撤销与回退
 
 | 操作 | 作用 |
 | ---- | ---- |
 | 中间栏 **撤销** | 撤销**当前文件**最近一次变更。 |
 | 对话区 **退回**（每轮标题旁） | 回退到该轮之前：撤销该轮及之后所有对话与文件变更。 |
 
-### 8. 建议用法
+### 9. 建议用法
 
 - 日记文件按日期命名，便于 Agent 查找与汇总。
 - 改已有内容时优先 **局部修改**；步骤里确认出现 `[edit_file]` 而非整篇 `[write_file]`。
 - `data/` 为私人数据，**请勿提交到 Git**。
+- 飞书多话题：同一 Agent 下用 `/new` 开新 Session，不必新建 Agent。
 - 飞书与 Web 看同一会话时，请确保 Web 打开的是飞书用户**已绑定**的那个 Session。
 
 ---
@@ -235,13 +261,12 @@ DiaryMaster/
 ├── backend/
 │   ├── agent.py              # Agent 主循环、chat_stream / chat_once
 │   ├── agents/               # 多 Agent 注册表、工作区、REST API
-│   ├── channels/feishu/      # 飞书长连接、dispatch、卡片状态消息
+│   ├── channels/feishu/      # 长连接、dispatch、/ 指令、卡片状态消息
 │   ├── memory/               # USER.md / MEMORY.md 存储与工具
 │   ├── session_store.py      # Session chat_log、变更、live 轮次同步
 │   └── main.py               # FastAPI 入口
 ├── web/                      # 前端（对话、文件树、设置、Agent 管理）
 ├── data/                     # Agent、Session、记忆、工作区（git 忽略）
-├── plan/                     # 产品与路线图文档
 ├── run.py                    # 推荐启动入口
 └── requirements.txt
 ```
@@ -252,6 +277,7 @@ DiaryMaster/
 
 | 日期 | 摘要 |
 | ---- | ---- |
+| 2026-06 | **飞书 `/` 指令**：`/new`、`/sessions`、`/switch` 等（飞书与 Web）；WS 单 loop 多 Agent；工作区统一 `data/agents/` |
 | 2026-06 | **多 Agent**：Session / 记忆 / 工作区 / API Key / 飞书按 Agent 隔离；Web Agent 管理与对话栏切换；IM 步骤增量同步到 Web |
 | 2026-05 | **飞书渠道**：长连接、卡片进度、按 Agent 配置；修复工作区递归错误 |
 | 2026-05 | **长期记忆**：`memory` 工具与设置页编辑；跨 Session 检索 |
