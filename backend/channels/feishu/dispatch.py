@@ -312,12 +312,21 @@ def _process_message(
         status = None
 
     try:
-        activate_session_for_open_id(open_id, agent_id)
+        activation = activate_session_for_open_id(open_id, agent_id)
         from backend.agent import chat_once
 
         def on_step(step: dict[str, Any]) -> None:
             if status is not None:
                 status.on_step(step)
+
+        if activation.daily_auto_new and status is not None:
+            status.on_step(
+                {
+                    "kind": "tool",
+                    "label": f"已自动开启今日新会话（{activation.session.id}）",
+                    "status": "done",
+                }
+            )
 
         result = chat_once(
             text,

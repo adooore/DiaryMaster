@@ -6,7 +6,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from backend.memory import ensure_memory_snapshot, refresh_memory_snapshot
 from backend.session_store import Session, store
@@ -14,8 +14,50 @@ from backend.session_store import Session, store
 _lock = threading.RLock()
 
 
+class FeishuSessionActivation(NamedTuple):
+    """飞书用户激活 Session 的结果（含是否因跨日自动新建）。"""
+
+    session: Session
+    daily_auto_new: bool
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _local_today() -> str:
+    """返回本机本地日历日期 YYYY-MM-DD。"""
+    return datetime.now().astimezone().date().isoformat()
+
+
+def _make_binding_value(session_id: str) -> dict[str, str]:
+    """构造 bindings.json 中的用户绑定对象。"""
+    return {
+        "active_session_id": session_id,
+        "session_day": _local_today(),
+        "updated_at": _now_iso(),
+    }
+
+
+def _binding_entry_session_day(entry: Any) -> str | None:
+    """从绑定条目解析 session_day；缺失时从 updated_at 回退；旧 string 格式返回 None。"""
+    if isinstance(entry, str):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    day = (entry.get("session_day") or "").strip()
+    if day:
+        return day
+    updated = (entry.get("updated_at") or "").strip()
+    if not updated:
+        return None
+    try:
+        dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().date().isoformat()
+    except ValueError:
+        return None
 
 
 def _bindings_path(agent_id: str | None = None) -> Path:
@@ -97,10 +139,7 @@ def set_active_session(
 
     with _lock:
         raw = _load_bindings_raw(agent_id)
-        raw[open_id] = {
-            "active_session_id": sid,
-            "updated_at": _now_iso(),
-        }
+        raw[open_id] = _make_binding_value(sid)
         _save_bindings_raw(raw, agent_id)
         store.switch_session(sid)
 
@@ -114,18 +153,18 @@ def create_and_bind_session(open_id: str, agent_id: str | None = None) -> Sessio
     with _lock:
         session = store.new_session()
         raw = _load_bindings_raw(agent_id)
-        raw[open_id] = {
-            "active_session_id": session.id,
-            "updated_at": _now_iso(),
-        }
+        raw[open_id] = _make_binding_value(session.id)
         _save_bindings_raw(raw, agent_id)
         refresh_memory_snapshot(session.id)
         return session
 
 
-def activate_session_for_open_id(open_id: str, agent_id: str | None = None) -> Session:
+def activate_session_for_open_id(
+    open_id: str,
+    agent_id: str | None = None,
+) -> FeishuSessionActivation:
     """
-    按 open_id 解析 Session：已绑定则 switch_session；否则新建并写入绑定。
+    按 open_id 解析 Session：同日继续当前绑定；跨日自动新建；无绑定则新建。
 
     需在调用前 set_active_agent_id，以便 store 指向正确 Agent 的 Session 库。
     """
@@ -134,15 +173,37 @@ def activate_session_for_open_id(open_id: str, agent_id: str | None = None) -> S
         raise ValueError("open_id 为空")
 
     with _lock:
-        sid = get_active_session_id(open_id, agent_id)
-        if sid:
-            try:
-                store.switch_session(sid)
-                ensure_memory_snapshot(sid)
-                return store.get_session()
-            except ValueError:
-                raw = _load_bindings_raw(agent_id)
-                raw.pop(open_id, None)
-                _save_bindings_raw(raw, agent_id)
+        today = _local_today()
+        raw = _load_bindings_raw(agent_id)
+        entry = raw.get(open_id)
+        sid = _parse_binding_value(entry) if entry is not None else None
 
-        return create_and_bind_session(open_id, agent_id)
+        if sid:
+            bound_day = _binding_entry_session_day(entry)
+            if bound_day == today:
+                try:
+                    store.switch_session(sid)
+                    ensure_memory_snapshot(sid)
+                    return FeishuSessionActivation(store.get_session(), False)
+                except ValueError:
+                    raw.pop(open_id, None)
+                    _save_bindings_raw(raw, agent_id)
+            elif bound_day is not None and bound_day != today:
+                session = store.new_session()
+                raw[open_id] = _make_binding_value(session.id)
+                _save_bindings_raw(raw, agent_id)
+                refresh_memory_snapshot(session.id)
+                return FeishuSessionActivation(session, True)
+            else:
+                try:
+                    store.switch_session(sid)
+                    ensure_memory_snapshot(sid)
+                    raw[open_id] = _make_binding_value(sid)
+                    _save_bindings_raw(raw, agent_id)
+                    return FeishuSessionActivation(store.get_session(), False)
+                except ValueError:
+                    raw.pop(open_id, None)
+                    _save_bindings_raw(raw, agent_id)
+
+        session = create_and_bind_session(open_id, agent_id)
+        return FeishuSessionActivation(session, False)

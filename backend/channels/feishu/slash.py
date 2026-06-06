@@ -11,6 +11,7 @@ HELP_TEXT = """可用指令：
 /switch <序号或id> · 切换会话
 /current · 查看当前会话
 
+每日首条消息会自动新建会话（按本机日历日）。
 示例：/switch 2  ·  /switch abc12345"""
 
 
